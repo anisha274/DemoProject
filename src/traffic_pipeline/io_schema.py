@@ -1,0 +1,50 @@
+import pyarrow as pa
+
+SCHEMA_VERSION = "1.0"
+
+FUSION_SCHEMA = pa.schema([
+    ("schema_version", pa.string()),
+    ("sequence_id", pa.string()),
+    ("frame_id", pa.int64()),
+    ("track_id", pa.int64()),
+    ("class_name", pa.string()),
+    ("video_time_s", pa.float64()),
+    ("timebase_verified", pa.bool_()),
+    ("x1", pa.float64()),
+    ("y1", pa.float64()),
+    ("x2", pa.float64()),
+    ("y2", pa.float64()),
+    ("center_u", pa.float64()),
+    ("center_v", pa.float64()),
+    ("confidence", pa.float64()),
+    ("relative_depth_median", pa.float64()),
+    ("relative_depth_iqr", pa.float64()),
+    ("depth_valid_fraction", pa.float64()),
+    ("context", pa.string()),
+    ("context_support", pa.float64()),
+    ("quality_flags", pa.string()),
+    ("depth_m", pa.float64()),
+    ("camera_x_m", pa.float64()),
+    ("camera_y_m", pa.float64()),
+    ("camera_z_m", pa.float64()),
+    ("world_x_m", pa.float64()),
+    ("world_y_m", pa.float64()),
+    ("world_z_m", pa.float64()),
+    ("metric_status", pa.string()),
+])
+
+TEMPORAL_SCHEMA = pa.schema(list(FUSION_SCHEMA) + [
+    pa.field("track_age_frames", pa.int64()),
+    pa.field("du_px_per_frame", pa.float64()),
+    pa.field("dv_px_per_frame", pa.float64()),
+    pa.field("image_speed_px_per_frame", pa.float64()),
+    pa.field("du_px_per_video_s", pa.float64()),
+    pa.field("dv_px_per_video_s", pa.float64()),
+    pa.field("context_changed", pa.bool_()),
+    pa.field("vx_mps", pa.float64()),
+    pa.field("vy_mps", pa.float64()),
+    pa.field("vz_mps", pa.float64()),
+    pa.field("speed_mps", pa.float64()),
+    pa.field("acceleration_mps2", pa.float64()),
+    pa.field("motion_status", pa.string()),
+])

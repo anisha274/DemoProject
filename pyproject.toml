@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "traffic_pipeline"
+version = "0.1.0"
+description = "Traffic awareness using RGB videos."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy",
+    "Pillow",
+    "PyYAML",
+    "pyarrow",
+    "av",
+    "opencv-python-headless",
+    "matplotlib",
+    "pytest",
+    "torch",
+    "torchvision",
+    "ultralytics",
+    "diffusers",
+    "transformers",
+    "accelerate",
+    "safetensors",
+    "huggingface_hub"
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]

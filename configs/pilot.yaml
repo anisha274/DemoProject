@@ -1,0 +1,33 @@
+schema_version: "1.0"
+paths:
+  video_dir: data/videos
+  output_dir: outputs
+  model_cache_dir: models
+runtime:
+  device: auto
+  seed: 42
+  frame_stride: 1
+  progress_every: 10
+models:
+  detector: yolo11n.pt
+  tracker: bytetrack.yaml
+  detection_confidence: 0.10
+  detection_iou: 0.50
+  detection_size: 640
+  depth: prs-eth/marigold-depth-v1-1
+  depth_steps: 4
+  depth_ensemble: 1
+  depth_resolution: 512
+  cpu_depth_steps: 1
+  cpu_depth_resolution: 256
+  segmentation: nvidia/segformer-b0-finetuned-cityscapes-1024-1024
+  segmentation_size: 512
+geometry:
+  calibration_file: null
+  poses_file: null
+  acquisition_timebase_file: null
+  depth_input_type: affine_invariant
+  allow_metric_output: false
+temporal:
+  max_gap_frames: 2
+  min_velocity_samples: 2
