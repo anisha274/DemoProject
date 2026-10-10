@@ -236,7 +236,7 @@ def evaluate_capture(data: dict, models: dict, margin: float) -> dict:
                 idx = np.array([i for i, o in enumerate(data["objects"]) if o["label"] == lbl])
                 sweep = {}
                 for mg in MARGIN_SWEEP:
-                    f, _ = score(data, m["far_m"], m.get("vertical_fov_deg"), False, mg, details=False)
+                    _, f = score(data, m["far_m"], m.get("vertical_fov_deg"), False, mg, details=False)
                     sweep[f"{mg * 100:g}cm"] = round(float(f[idx].mean()), 4)
                 per_label[lbl] = {"objects": int(len(idx)), "mean_inside_fraction_by_tolerance": sweep}
             out[f"{name}_per_label"] = per_label

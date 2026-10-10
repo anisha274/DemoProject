@@ -21,6 +21,14 @@ The teammate's gesture code lives in a separate repository
 | `check_camera_streams.py` | Compares the two camera streams that share RGB basenames; checks RGB/label alignment. |
 | `track_objects.py` | Stage 2: YOLO11n + ByteTrack on a segmentation run's frames, with box-level segmentation summaries. |
 | `verify_tracking_run.py` | Integrity checks recomputed from a tracking run's files (not an accuracy evaluation). |
+| `configs/depth_thud_synthetic.json` | Validated synthetic depth encoding and pixel intrinsics, with the evidence summary. |
+| `thud_depth.py` | Depth decoding (raw → metres, saturation → invalid), intrinsics from FOV, back-projection. |
+| `validate_depth.py` | Fits and tests the depth/intrinsics against dataset 3D boxes on several captures. |
+| `tests/test_thud_depth.py` | Unit tests for `thud_depth.py`, plus one dataset check (`python -m unittest discover -s tests`). |
+| `fuse_objects.py` | Step 4: per-tracked-object 3D position (camera and world frame) and floor context from depth + pose + predicted masks + tracks, with geometry checks and evaluation. |
+| `configs/fusion_office.json` | Inputs, pixel-selection rules, floor-context rule and evaluation settings for `fuse_objects.py`. |
+| `configs/robot.json` | Provisional robot width (0.60 m) and safety margin per side (0.10 m); load dimensions to come from Unity. |
+| `tests/test_fuse_objects.py` | Unit tests for the pose convention, pixel selection and point-to-box distance. |
 
 ## Setup
 
@@ -167,9 +175,10 @@ Confirmed for Office/dynamic/Capture_1:
 Still ambiguous:
 - Which sensor rendered each on-disk RGB file cannot be proven: the folder is flattened, the basenames
   are shared, and both sensors have the same pose, so their renders would look the same.
-- Projecting `camera`'s 3D boxes with a standard pinhole model and the recorded intrinsics does not reproduce
-  `camera_0`'s 2D boxes. The Unity intrinsics/coordinate convention is not validated, so this test is
-  inconclusive.
+- `check_camera_streams.py` projects 3D boxes with the *recorded* intrinsics, which are not pixel units (see
+  the depth section). With the validated 60° intrinsics, `camera`'s 3D boxes project onto `camera_0`'s 2D boxes
+  (median IoU about 0.72) and contain `camera_0`'s depth-mask points. That confirms shared geometry, not
+  which sensor rendered each RGB file.
 
 ## Stage 2: 2D detection, tracking and segmentation association
 
@@ -225,11 +234,108 @@ timestamps, box bounds, image sizes, duplicate `(sequence, camera, step, track I
 association arithmetic on a sample of boxes, and the video frame count. These are integrity checks, not a
 detection or identity-accuracy evaluation; that is a separate future step.
 
+## Stage 3: synthetic depth encoding and camera intrinsics (validated)
+
+```powershell
+cd E:\RobotVisionWorkspace\robot_vision
+.\.venv\Scripts\python.exe validate_depth.py
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+```
+
+Result, recorded in `configs/depth_thud_synthetic.json` and used by `thud_depth.py`:
+
+- **Depth**: `depth_m = raw / 65535 × 10.0`. The value is planar depth along the optical axis (Z), not distance
+  along the pixel ray. `raw == 65535` means "10 m or more" and is treated as invalid. **Not millimetres.**
+- **Intrinsics**: square pixels, vertical field of view 60°: `fx = fy = 265 / tan(30°) ≈ 459.0`, `cx = 365`,
+  `cy = 265` for 730×530. The `camera_intrinsic` values in the metadata (1013.89 / 1520.83) are **not** pixel
+  units; don't use them.
+
+How it was established (`validate_depth.py`):
+- **Evidence.** In each frame one sensor has instance masks and the other has 3D boxes in metres, with the
+  same pose and timestamp. Each object's masked depth pixels are back-projected to 3D and tested against
+  its 3D box.
+- **Fit, then held-out test.** Far plane and field of view were fitted on Office/dynamic/Capture_1
+  (9.97 m, 60.3°). The round values 10 m / 60° fit tighter and were tested unchanged on Office/dynamic/Capture_2,
+  Office/static/Capture_1, Gym/dynamic/Capture_1 and Gym/static/Capture_1. The Gym scenes have the sensor
+  roles swapped; the script detects the roles from the annotations.
+- **Error estimate.** Chairs are 100% inside their boxes at 0 cm tolerance, desks 100% within 0.5 cm, and all
+  Gym classes 100% within 2 cm. So combined depth + intrinsics error is within about 2 cm over roughly
+  0.5–10 m, judged against Unity's boxes.
+- **Rejected alternatives**: millimetres (0% inside), ray distance (25–42%), recorded intrinsics (6–16%).
+  Projecting 3D boxes with the 60° intrinsics matches the 2D boxes (median IoU 0.71–0.82) vs about 0 with the
+  recorded ones.
+- **Known exception**: Office sofa boxes enclose only part of the sofa (about 44% inside). The overhang is
+  one-sided and constant across hundreds of viewpoints, which points to an incomplete box annotation, not
+  a depth error.
+
+Outputs: `outputs/depth_check_<date>_<time>/depth_validation_report.json` and `depth_vs_3d_boxes.png`.
+
+## Stage 4: tracked-object 3D fusion (reference-depth baseline)
+
+```powershell
+.\.venv\Scripts\python.exe fuse_objects.py --check-only   # geometry checks + steps 0, 150, 299
+.\.venv\Scripts\python.exe fuse_objects.py                # checks again, then all 300 tracked frames
+```
+
+**Depth source.** THUD reference depth (Unity render). Every result here is a *reference-depth fusion
+baseline*; it says nothing about the accuracy of an RGB-only depth model.
+
+**Prediction inputs, unchanged.** The 300-frame tracking run (YOLO11n + ByteTrack) and the SegFormer run it
+references: boxes, track IDs, steps, timestamps and predicted grouped masks. Reference masks, boxes and object
+positions are read only by the geometry checks and the evaluation.
+
+**Geometry checks** (`geometry_checks.json`; the run stops before producing any positions if one fails):
+- Tracked frames belong to the configured Office capture. RGB file name, step, timestamp, sequence and capture
+  ID match the metadata. The tracked sensor is the labelled RGB sensor (`camera_0`).
+- Depth, RGB and predicted mask have the same size. Depth edges coincide with RGB edges at zero shift.
+- Depth encoding re-confirmed per frame: reference-instance points fall inside the 3D boxes when read as planar
+  Z, but not when read as distance along the ray.
+- Pose convention: `world = R(q) p_cam + t`, with `q` stored as `[x, y, z, w]`. Ego pose is identity, and both
+  sensors share the pose. Static 3D boxes stay fixed in the world under this convention, and move by metres
+  under the transposed one.
+
+**What a position is.** For each tracked box, pixels are chosen from the *predicted* mask:
+1. the detector's own class (person, chair, couch→sofa);
+2. otherwise box pixels that are not wall, floor or ceiling;
+3. otherwise the box is flagged invalid.
+
+The estimate is the per-axis median of those pixels back-projected with depth. That is a point on the visible
+object surface, not a 3D box centre. `object_states.csv` gives it in camera coordinates (x right, y up, z
+forward) and world coordinates, plus validity flags. `floor_context` says whether predicted floor touches the
+box's bottom edge. `bottom_height_above_floor_m` uses the floor height measured from predicted floor pixels.
+
+**Evaluation** (`evaluation_report.json`, `association_evaluation.csv`):
+- *Association.* Each frame, tracked boxes are matched to reference 2D boxes with a class-compatible label and
+  IoU >= 0.5 (Hungarian).
+- *Visible-point error.* Distance to the median of the reference instance mask back-projected with the same
+  depth. Because the depth is the same, this isolates pixel-selection error.
+- *3D-box test.* Only Chair, Desk and Sofa have 3D boxes in this capture; **people have none**.
+- *World spread.* Spread of a static object's track position, compared with the same spread for the
+  reference visible point.
+
+| 300 frames, run `fuse_300f_20261011_042733` | Result |
+|---|---|
+| Tracked observations / valid 3D positions | 1903 / 1793 |
+| Associated with a reference object (valid position) | 1380 |
+| Visible-point error, all classes: median / p90 | 0.07 m / 0.41 m |
+| People (546): median / p90 | 0.02 m / 0.20 m |
+| Chairs (369): median, point inside 3D box (+5 cm) | 0.13 m, 94% |
+| Sofas (98): median, inside 3D box | 0.40 m, 66% |
+| Static-object track spread in world: estimate vs reference visible point | 0.20 m vs 0.06 m |
+
+Failure modes seen:
+- The box-minus-background fallback can pick an object behind or in front of the target. This causes the
+  multi-metre outliers.
+- Predicted sofa pixels cover only part of the sofa.
+- 263 couch boxes match no reference sofa box at IoU 0.5.
+
+The selection rules were fixed before the full run and were not tuned on these results.
+
 ## Known limitations
 
-- Depth is not used. The encoding of the synthetic 16-bit depth PNGs is not yet validated: do not assume
-  millimetres, do not divide by 1000, and do not treat relative depth predictions as metric. No distance,
-  speed, passage width or clearance is reported.
+- Depth decoding is validated only for the THUD **synthetic** captures above. Real-scene depth and any
+  monocular or relative depth model are not validated. No distance, speed, passage width or clearance is
+  computed yet.
 - Tracking works in image pixels only. No metric distance, speed, 3D clearance or movement decision is
   computed.
 - Semantic labels are used only as evaluation references, never as model input.
