@@ -1,0 +1,7 @@
+# Common dependencies (all platforms). Versions are the ones tested on Windows / Python 3.12.14.
+# PyTorch is NOT listed here: install the platform-specific build first (see README.md).
+transformers==5.19.0
+huggingface_hub==2.2.0
+numpy==2.5.2
+pillow==12.3.0
+matplotlib==3.11.2

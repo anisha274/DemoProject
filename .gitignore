@@ -1,0 +1,47 @@
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Python caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Datasets (THUD lives outside the repo, e.g. D:\RGB-D)
+data/
+datasets/
+RGB-D/
+Synthetic_Scenes/
+Real_Scenes/
+
+# Model weights and caches
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.safetensors
+*.bin
+.cache/
+hf_cache/
+huggingface/
+
+# Generated outputs and logs
+outputs/
+results/
+runs/
+*.log
+logs/
+
+# Large archives
+*.zip
+*.7z
+*.tar
+*.tar.gz
+*.rar
+
+# Local machine-specific configuration
+*.local.json
+.env
+.vscode/
+.idea/
