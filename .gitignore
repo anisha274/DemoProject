@@ -22,6 +22,7 @@ Real_Scenes/
 *.onnx
 *.safetensors
 *.bin
+robot_vision/models/
 .cache/
 hf_cache/
 huggingface/
