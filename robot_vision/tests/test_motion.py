@@ -87,6 +87,37 @@ class LabelTests(unittest.TestCase):
         self.assertEqual(p.update("approaching", 0.6), "approaching")
 
 
+class Step8v2Tests(unittest.TestCase):
+    def test_class_vote_smooths_flicker(self):
+        t = np.arange(8) * 0.1
+        cls = ["chair", "chair", "couch", "chair", "chair", "couch", "couch", "couch"]
+        v = mo.vote_classes(t, cls, 0.35)  # 4-observation trailing window
+        self.assertEqual(v[:5], ["chair"] * 5)  # single flicker ignored
+        self.assertEqual(v[5], "chair")  # tie 2-2 keeps the previous vote
+        self.assertEqual(v[7], "couch")  # a lasting change is adopted
+
+    def test_no_reset_on_class_change_when_disabled(self):
+        t = np.arange(4) * DT
+        _, reasons = mo.segment_track(t, np.zeros((4, 2)), ["chair", "couch", "chair", "couch"],
+                                      {**MCFG, "reset_on_class_change": False})
+        self.assertEqual(reasons, [])
+
+    def test_coverage_flags(self):
+        t = np.array([0.0, 0.1, 0.2, 0.3, 0.6, 0.7])
+        n = np.array([100, 110, 400, 420, 430, 1000], float)
+        f = mo.coverage_flags(t, n, 0.25, 2.0)
+        # 400 vs 100/110 within 0.25 s; 420 vs 110 (0.2 s back); 430 has no step inside its window; 1000 vs 430
+        self.assertEqual(f.tolist(), [False, False, True, True, False, True])
+
+    def test_uncertainty_scaled_threshold(self):
+        lab = {**LAB, "uncertainty_k": 2.0}
+        self.assertEqual(mo.moving_state(0.5, None, lab, speed_se=0.05), "moving")  # 0.5 - 0.1 >= 0.35
+        self.assertEqual(mo.moving_state(0.5, None, lab, speed_se=0.1), "unknown")  # 0.3 < 0.35, 0.7 > 0.2
+        self.assertEqual(mo.moving_state(0.1, None, lab, speed_se=0.2), "unknown")  # upper bound 0.5 > 0.2
+        self.assertEqual(mo.moving_state(0.1, None, lab, speed_se=0.02), "stationary")
+        self.assertEqual(mo.moving_state(0.5, None, LAB, speed_se=0.1), "moving")  # k = 0: unchanged behaviour
+
+
 class RouteTests(unittest.TestCase):
     line = np.array([[0.0, 0.0], [0.0, 10.0]])
 

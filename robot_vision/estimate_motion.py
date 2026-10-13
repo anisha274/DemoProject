@@ -17,14 +17,16 @@ Per observation (motion_states.csv):
   time_to_route_s assumes constant velocity and is NOT a time to collision.
 
 Usage (from robot_vision/):
-    python estimate_motion.py                      # config configs/motion_office.json
-    python estimate_motion.py --config <file> --no-route
+    python estimate_motion.py --fusion-run outputs/fuse_300f_20261011_042733 \
+        --route-config configs/proxy_route_office_capture1.json
+    (no --route-config: every route field is not_evaluated)
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import math
 import platform
@@ -42,6 +44,7 @@ from PIL import Image, ImageDraw
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
+import data_splits as ds  # noqa: E402
 import motion as mo  # noqa: E402
 import run_paths as rp  # noqa: E402
 import thud_data as td  # noqa: E402
@@ -55,9 +58,10 @@ SERIES = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#62
 INK, MUTED, GRID = "#2b2b2a", "#77766f", "#e4e3de"
 
 FIELDS = [
-    "sequence_id", "step", "timestamp", "track_id", "class_name",
+    "sequence_id", "step", "timestamp", "track_id", "class_name", "motion_class",
     "pixel_source", "selection_method", "selected_pixel_count", "valid_depth_pixel_count", "depth_spread_m",
-    "position_valid", "invalid_reason", "reliable", "unreliable_reason",
+    "position_valid", "invalid_reason", "reliable", "unreliable_reason", "coverage_flag",
+    "distance_m", "distance_bin",
     "raw_world_x", "raw_world_y", "raw_world_z",
     "segment", "resets_so_far", "reset_reason", "motion_status",
     "filt_world_x", "filt_world_y", "filt_world_z", "vel_x_mps", "vel_z_mps", "vel_se_x_mps", "vel_se_z_mps",
@@ -133,7 +137,8 @@ def ground_plane_check(frames: list[dict], cfg: dict) -> dict:
 
 # ---------------------------------------------------------------- estimation (prediction side)
 
-def estimate_series(t, xz, steps, cls, cam: Camera, cfg: dict, route: dict | None, rng) -> tuple[list[dict], list[str]]:
+def estimate_series(t, xz, steps, cls, cam: Camera, cfg: dict, route: dict | None, rng,
+                    monte_carlo: bool = True) -> tuple[list[dict], list[str]]:
     """Motion estimates for one time-ordered series of reliable positions (a track, or a reference instance)."""
     mcfg, lab = cfg["motion"], cfg["labels"]
     seg, reasons = mo.segment_track(t, xz, cls, mcfg)
@@ -154,7 +159,7 @@ def estimate_series(t, xz, steps, cls, cam: Camera, cfg: dict, route: dict | Non
         if e is None:
             rec.update({"motion_status": "insufficient_history", "motion_label": "insufficient_history",
                         "range_label": "insufficient_history"})
-            rec.update(route_fields(None, None, route, cfg, rng))
+            rec.update(route_fields(None, None, route, cfg, rng, monte_carlo))
             out.append(rec)
             continue
         p, v = np.array([e["x"], e["z"]]), np.array([e["vx"], e["vz"]])
@@ -162,7 +167,7 @@ def estimate_series(t, xz, steps, cls, cam: Camera, cfg: dict, route: dict | Non
         _, rate, _ = mo.line_fit(t[e["idx"]], ranges, t[i])
         u = (p - c) / max(np.linalg.norm(p - c), 1e-9)  # camera_proxy -> object
         radial_obj, radial_cam = float(v @ u), float(-vc @ u)
-        state_prev = mo.moving_state(e["speed"], state_prev, lab)
+        state_prev = mo.moving_state(e["speed"], state_prev, lab, e["speed_se"])
         rec.update({
             "motion_status": "estimated", "filt_world_x": e["x"], "filt_world_z": e["z"],
             "vel_x_mps": e["vx"], "vel_z_mps": e["vz"], "vel_se_x_mps": e["se_vx"], "vel_se_z_mps": e["se_vz"],
@@ -173,12 +178,13 @@ def estimate_series(t, xz, steps, cls, cam: Camera, cfg: dict, route: dict | Non
             "range_rate_mps": rate, "range_rate_object_mps": radial_obj, "range_rate_camera_mps": radial_cam,
             "range_label": rng_track.update(mo.range_candidate(rate, lab), t[i]),
             "_idx": e["idx"]})
-        rec.update(route_fields(e, rec["motion_label"], route, cfg, rng))
+        rec.update(route_fields(e, rec["motion_label"], route, cfg, rng, monte_carlo))
         out.append(rec)
     return out, reasons
 
 
-def route_fields(e: dict | None, label: str | None, route: dict | None, cfg: dict, rng) -> dict:
+def route_fields(e: dict | None, label: str | None, route: dict | None, cfg: dict, rng,
+                 monte_carlo: bool = True) -> dict:
     if route is None:
         return {"route_label": "none", "route_status": "not_evaluated"}
     out = {"route_label": route["label"]}
@@ -197,6 +203,11 @@ def route_fields(e: dict | None, label: str | None, route: dict | None, cfg: dic
     r = cfg["route"]
     v = np.array([[e["vx"], e["vz"]]])
     ttr = float(mo.time_to_route(p, v, route["line"], half, r["horizon_s"], r["time_step_s"])[0])
+    if not monte_carlo:  # reference series: point value only
+        out["route_status"] = "crossing_route" if math.isfinite(ttr) else "not_crossing"
+        if math.isfinite(ttr):
+            out["time_to_route_s"] = ttr
+        return out
     samples = v + rng.normal(size=(r["monte_carlo_samples"], 2)) * np.array([e["se_vx"], e["se_vz"]])
     ts = mo.time_to_route(p, samples, route["line"], half, r["horizon_s"], r["time_step_s"])
     fin = ts[np.isfinite(ts)]
@@ -215,18 +226,27 @@ def estimate_tracks(states: list[dict], cam: Camera, cfg: dict, route: dict | No
         by_track[s["track_id"]].append(s)
     rows, resets = [], defaultdict(Counter)
     dynamic = set(cfg["motion_trust"]["dynamic_classes"])
+    mcfg, cov = cfg["motion"], cfg["quality"].get("coverage_change")
     for tid, obs in by_track.items():
         obs.sort(key=lambda s: s["timestamp"])
-        for s in obs:
+        ts = np.array([s["timestamp"] for s in obs])
+        raw_cls = [s["class_name"] for s in obs]
+        voted = mo.vote_classes(ts, raw_cls, mcfg["class_vote_window_s"]) if mcfg.get("class_vote_window_s") else raw_cls
+        flags = (mo.coverage_flags(ts, np.array([s["selected_pixels"] for s in obs], float), cov["window_s"],
+                                   cov["max_ratio"]) if cov else np.zeros(len(obs), bool))
+        for s, c, f in zip(obs, voted, flags):
+            s["motion_class"], s["coverage_flag"] = c, bool(f)
             s["reliable"], s["unreliable_reason"] = mo.quality(s, cfg["quality"])
+            if s["reliable"] and f:
+                s["reliable"], s["unreliable_reason"] = False, "mask_coverage_change"
         rel = [s for s in obs if s["reliable"]]
         est = {}
         if rel:
             t = np.array([s["timestamp"] for s in rel])
             xz = np.array([[s["world_x"], s["world_z"]] for s in rel])
-            series, reasons = estimate_series(t, xz, [s["step"] for s in rel], [s["class_name"] for s in rel],
+            series, reasons = estimate_series(t, xz, [s["step"] for s in rel], [s["motion_class"] for s in rel],
                                               cam, cfg, route, rng)
-            resets[rel[0]["class_name"]].update(reasons)
+            resets[rel[0]["motion_class"]].update(reasons)
             for s, r in zip(rel, series):
                 idx = r.pop("_idx", None)
                 if idx is not None:
@@ -234,8 +254,10 @@ def estimate_tracks(states: list[dict], cam: Camera, cfg: dict, route: dict | No
                 est[s["step"]] = r
         last_seg = 0
         for s in obs:
-            row = {k: s[k] for k in ("sequence_id", "step", "timestamp", "track_id", "class_name", "selection_method",
-                                     "position_valid", "invalid_reason", "reliable", "unreliable_reason")}
+            row = {k: s[k] for k in ("sequence_id", "step", "timestamp", "track_id", "class_name", "motion_class",
+                                     "selection_method", "position_valid", "invalid_reason", "reliable",
+                                     "unreliable_reason", "coverage_flag")}
+            row.update(distance_fields(s, cam, cfg["evaluation"]["distance_bins_m"]))
             row.update({"pixel_source": mo.pixel_source(s["selection_method"]), "selected_pixel_count": s["selected_pixels"],
                         "valid_depth_pixel_count": s["valid_depth_pixels"], "depth_spread_m": s["depth_iqr_m"],
                         "raw_world_x": s["world_x"], "raw_world_y": s["world_y"], "raw_world_z": s["world_z"]})
@@ -251,10 +273,41 @@ def estimate_tracks(states: list[dict], cam: Camera, cfg: dict, route: dict | No
                     c, _ = cam.at(s["step"])
                     row.update({"camera_proxy_x": c[0], "camera_proxy_z": c[1],
                                 "range_m": float(np.hypot(s["world_x"] - c[0], s["world_z"] - c[1]))})
-            row["motion_trusted"] = row["motion_status"] == "estimated" and row["class_name"] in dynamic
+            row["motion_trusted"] = row["motion_status"] == "estimated" and row["motion_class"] in dynamic
             rows.append(row)
     rows.sort(key=lambda r: (r["step"], int(r["track_id"])))
     return rows, {k: dict(v) for k, v in resets.items()}
+
+
+def class_change_counts(rows: list[dict]) -> dict:
+    """Class changes between consecutive observations of a track: detector class vs voted motion_class."""
+    by = defaultdict(list)
+    for r in rows:
+        by[r["track_id"]].append(r)
+    raw = voted = 0
+    for v in by.values():
+        v.sort(key=lambda r: r["timestamp"])
+        raw += sum(a["class_name"] != b["class_name"] for a, b in zip(v, v[1:]))
+        voted += sum(a["motion_class"] != b["motion_class"] for a, b in zip(v, v[1:]))
+    return {"detector_class": raw, "motion_class": voted}
+
+
+def bin_label(value: float | None, edges: list[float], unit: str) -> str:
+    if value is None:
+        return "unknown"
+    for lo, hi in zip(edges, edges[1:]):
+        if lo <= value < hi:
+            return f"{lo:g}-{hi:g} {unit}"
+    return f"{edges[-1]:g}+ {unit}"
+
+
+def distance_fields(s: dict, cam: Camera, edges: list[float]) -> dict:
+    """Ground-plane distance camera_proxy -> visible-surface point; available whenever any pixel had valid depth."""
+    if s["world_x"] is None or s["world_z"] is None:
+        return {"distance_bin": "unknown"}
+    c, _ = cam.at(s["step"])
+    d = float(np.hypot(s["world_x"] - c[0], s["world_z"] - c[1]))
+    return {"distance_m": d, "distance_bin": bin_label(d, edges, "m")}
 
 
 # ---------------------------------------------------------------- evaluation (reference data used here only)
@@ -294,7 +347,8 @@ def evaluate(rows: list[dict], assoc: list[dict], ctx: dict, cam: Camera, cfg: d
     for iid, pts in refs.items():
         t = np.array([p["timestamp"] for p in pts])
         xz = np.array([[p["x"], p["z"]] for p in pts])
-        series, _ = estimate_series(t, xz, [p["step"] for p in pts], [ref_label[iid]] * len(pts), cam, cfg, route, rng)
+        series, _ = estimate_series(t, xz, [p["step"] for p in pts], [ref_label[iid]] * len(pts), cam, cfg, route, rng,
+                                    monte_carlo=False)
         for p, r in zip(pts, series):
             r.pop("_idx", None)
             ref_est[(iid, p["step"])] = r
@@ -328,8 +382,8 @@ def evaluate(rows: list[dict], assoc: list[dict], ctx: dict, cam: Camera, cfg: d
     def motion_compare(prs):
         both = [(r, q) for r, q in prs if r["motion_status"] == "estimated" and q["motion_status"] == "estimated"]
         se = [r["speed_mps"] - q["speed_mps"] for r, q in both]
-        de = [angle_diff(r["heading_deg"], q["heading_deg"]) for r, q in both
-              if r["speed_mps"] >= ev["direction_min_speed_mps"] and q["speed_mps"] >= ev["direction_min_speed_mps"]]
+        hmin = ev["heading_min_speed_mps"]
+        de = [angle_diff(r["heading_deg"], q["heading_deg"]) for r, q in both if q["speed_mps"] >= hmin]
         lab = [(r["motion_label"], q["motion_label"]) for r, q in prs if known(r["motion_label"]) and known(q["motion_label"])]
         rlab = [(r["range_label"], q["range_label"]) for r, q in prs if known(r["range_label"]) and known(q["range_label"])]
         conf = defaultdict(Counter)
@@ -339,8 +393,9 @@ def evaluate(rows: list[dict], assoc: list[dict], ctx: dict, cam: Camera, cfg: d
                 "speed_error_mps": stats(se), "abs_speed_error_mps": stats(abs(x) for x in se),
                 "reference_speed_mps": stats(q["speed_mps"] for _, q in both),
                 "estimated_speed_mps": stats(r["speed_mps"] for r, _ in both),
-                "direction_error_deg": stats(de),
-                "direction_rule": f"both speeds >= {ev['direction_min_speed_mps']} m/s",
+                "heading_error_deg": stats(de),
+                "heading_rule": f"reference speed >= {hmin} m/s",
+                "heading_pairs_excluded_low_reference_speed": len(both) - len(de),
                 "motion_label_pairs": len(lab), "motion_label_agreement": float(np.mean([a_ == b_ for a_, b_ in lab])) if lab else None,
                 "motion_label_confusion_ref_to_est": {k: dict(v) for k, v in conf.items()},
                 "range_label_pairs": len(rlab),
@@ -375,7 +430,35 @@ def evaluate(rows: list[dict], assoc: list[dict], ctx: dict, cam: Camera, cfg: d
         tracks_per_ref[iid].add(tid)
     people_ids = [iid for iid, lab in ref_label.items() if lab in ev["person_reference_labels"]]
 
+    def bin_counts(rs):
+        return {"observations": len(rs), "invalid_positions": sum(not r["position_valid"] for r in rs),
+                "invalid_reasons": dict(Counter(r["invalid_reason"] for r in rs if not r["position_valid"])),
+                "reliable": sum(r["reliable"] for r in rs),
+                "unreliable_reasons": dict(Counter(r["unreliable_reason"] for r in rs if not r["reliable"])),
+                "estimated": sum(r["motion_status"] == "estimated" for r in rs),
+                "trusted": sum(r["motion_trusted"] for r in rs)}
+    bins = [*(bin_label((lo + hi) / 2, ev["distance_bins_m"], "m") for lo, hi in
+              zip(ev["distance_bins_m"], ev["distance_bins_m"][1:])),
+            bin_label(ev["distance_bins_m"][-1], ev["distance_bins_m"], "m"), "unknown"]
+    by_distance = {}
+    for b in bins:
+        rs = [r for r in rows if r["distance_bin"] == b]
+        ppl = [r for r in rs if r.get("eval_group") == "people"]
+        by_distance[b] = {"all_observations": bin_counts(rs), "people_observations": bin_counts(ppl),
+                          "people_vs_reference": motion_compare([(r, q) for r, q in pairs["people"] if r["distance_bin"] == b])}
+    people_in_capture = set()
+    for f in ctx["frames"]:
+        for a in ctx["records"][(ctx["label_sensor"], f["step"])]["annotations"]:
+            if a["id"] == "bounding box":
+                people_in_capture |= {v["instance_id"] for v in a["values"]
+                                      if v["label_name"] in ev["person_reference_labels"]}
+
     out = {
+        "capture_facts": {"frames": len(ctx["frames"]),
+                          "duration_s": ctx["frames"][-1]["timestamp"] - ctx["frames"][0]["timestamp"]
+                          + float(np.median(np.diff([f["timestamp"] for f in ctx["frames"]]))),
+                          "reference_people_visible_in_2d_boxes": len(people_in_capture),
+                          "note": "people = distinct reference instance IDs with a people 2D box in any processed frame"},
         "reference_use": "reference instance masks + reference depth + reference poses give a visible-surface-point "
                          "trajectory per reference instance (instance IDs are stable across frames). Its velocity is a "
                          "PROXY, not the exact person-centre velocity. Tracks link to instances through the Step 4 "
@@ -387,6 +470,8 @@ def evaluate(rows: list[dict], assoc: list[dict], ctx: dict, cam: Camera, cfg: d
                      "people_reference_instances": len(people_ids),
                      "tracks_per_people_instance": {str(i): len(tracks_per_ref[i]) for i in sorted(people_ids)}},
         "people": motion_compare(pairs["people"]),
+        "by_distance_bin": by_distance,
+        "distance_rule": ev["distance_rule"],
         "static_control": {"static_verified": static_control("static_verified"),
                            "static_unverified": static_control("static_unverified")},
         "static_verified_vs_reference": motion_compare(pairs["static_verified"]),
@@ -405,6 +490,8 @@ def ttr_eval(rows: list[dict], refs: dict, route: dict, cfg: dict) -> dict:
                                                                                 route["line"]) <= half)
            for iid, v in refs.items()}
     res, realized, outcome = [], [], Counter()
+    edges = cfg["evaluation"]["ttr_lookahead_bins_s"]
+    by_bin = defaultdict(lambda: {"outcomes": Counter(), "errors": []})
     for r in rows:
         if r.get("eval_group") != "people" or "ref_instance_id" not in r or r["route_status"] not in (
                 "crossing_route", "not_crossing", "stationary_outside"):
@@ -417,20 +504,30 @@ def ttr_eval(rows: list[dict], refs: dict, route: dict, cfg: dict) -> dict:
         entered = t[fut & inside]
         observed_to_horizon = t.max() >= r["timestamp"] + H - 0.05 and fut.any()
         if r["route_status"] == "crossing_route":
+            b = by_bin[bin_label(r["time_to_route_s"], edges, "s")]
             if len(entered):
                 outcome["crossing_and_entered"] += 1
                 realized.append(entered[0] - r["timestamp"])
                 res.append(r["time_to_route_s"] - realized[-1])
+                b["outcomes"]["entered"] += 1
+                b["errors"].append(res[-1])
             else:
-                outcome["crossing_no_entry_observed" if observed_to_horizon else "crossing_censored"] += 1
+                key = "no_entry_observed" if observed_to_horizon else "censored"
+                outcome["crossing_" + key] += 1
+                b["outcomes"][key] += 1
         else:
             if len(entered):
                 outcome["not_crossing_but_entered"] += 1
+                by_bin["missed, realized " + bin_label(entered[0] - r["timestamp"], edges, "s")]["outcomes"]["missed"] += 1
             else:
                 outcome["not_crossing_no_entry_observed" if observed_to_horizon else "not_crossing_censored"] += 1
     return {"route": route["label"], "outcomes_people": dict(outcome),
             "error_s_estimated_minus_realized": stats(res), "abs_error_s": stats(abs(x) for x in res),
             "realized_time_to_route_s": stats(realized),
+            "by_estimated_lookahead_bin": {k: {"outcomes": dict(v["outcomes"]),
+                                               "censored_separately": v["outcomes"].get("censored", 0),
+                                               "error_s_estimated_minus_realized": stats(v["errors"])}
+                                           for k, v in sorted(by_bin.items())},
             "realized_entry": "first later frame (within the horizon) in which the associated reference visible point "
                               "is inside the corridor; censored = the sequence or the reference visibility ended first",
             "caveat": "time to reach a static proxy corridor under constant velocity; not a time to collision"}
@@ -624,12 +721,19 @@ def load_states(path: Path) -> list[dict]:
 def run(args: argparse.Namespace) -> Path:
     cfg_path = resolve(args.config)
     cfg = read_json(cfg_path)
+    cfg_sha = hashlib.sha256(cfg_path.read_bytes()).hexdigest()
+    frozen_path = resolve(args.frozen_record)
+    frozen = read_json(frozen_path) if frozen_path.exists() else None
+    config_is_frozen = bool(frozen and frozen["sha256"] == cfg_sha)
+    if args.final_evaluation and not config_is_frozen:
+        raise SystemExit(f"--final-evaluation requires the frozen motion config ({frozen_path.name}); "
+                         f"{cfg_path.name} has sha256 {cfg_sha}.")
     office = td.load_config(resolve(cfg["office_config"]))
     rp.set_active_roots(rp.roots_from_config(office))
     splits = read_json(resolve(cfg["splits_config"]))
     robot = read_json(resolve(cfg["robot_config"]))
     depth_cfg = tdd.load_depth_config(resolve(cfg["depth_config"]))
-    route_cfg = None if args.no_route or not cfg.get("route_config") else read_json(resolve(cfg["route_config"]))
+    route_cfg = read_json(resolve(args.route_config)) if args.route_config else None
     route = None
     if route_cfg:
         from make_proxy_route import required_width
@@ -637,29 +741,31 @@ def run(args: argparse.Namespace) -> Path:
         if abs(w - route_cfg["width_m"]) > 1e-6:
             raise SystemExit(f"Route width {route_cfg['width_m']} differs from robot.json required width {w}; regenerate it.")
         route = {"label": route_cfg["label"], "width_m": route_cfg["width_m"], "line": np.array(route_cfg["centreline_xz_m"])}
-    fusion = resolve(cfg["fusion_run"])
+    fusion = resolve(args.fusion_run)
     if not (fusion / "COMPLETE").exists():
         raise SystemExit(f"Fusion run is not complete: {fusion}")
     fusion_info = read_json(fusion / "run_info.json")
+    # the capture is the one the fusion run was made from (stored relative to the dataset root)
+    office["capture_dir"] = str(rp.resolve(fusion_info["capture_dir"], rp.active_roots()))
     frames = [json.loads(l) for l in (fusion / "frames.jsonl").read_text(encoding="utf-8").splitlines() if l]
     states = load_states(fusion / "object_states.csv")
-    capture = str(Path(office["capture_dir"]).as_posix()).split("Synthetic_Scenes/")[-1]
-    split = next((n for n, caps in splits["splits"].items()
-                  if capture.startswith(splits["scene"].split("Synthetic_Scenes/")[-1]) and capture.split("/")[-1] in caps), None)
-    if split == "final_evaluation" and not args.final_evaluation:
-        raise SystemExit("This capture is in the final-evaluation split; pass --final-evaluation for the one frozen-config run.")
+    key = ds.capture_key(office["capture_dir"], office["dataset_root"])
+    split = ds.guard(key, args.final_evaluation, splits)
+    capture = key.split("Synthetic_Scenes/")[-1]
 
     out = resolve(office["output_root"]) / f"motion_{len(frames)}f_{datetime.now():%Y%m%d_%H%M%S}"
     (out / "overlays").mkdir(parents=True)
     (out / "config_used").mkdir()
     for p in [cfg_path, resolve(cfg["robot_config"]), resolve(cfg["splits_config"])] + (
-            [resolve(cfg["route_config"])] if route_cfg else []):
+            [resolve(args.route_config)] if route_cfg else []):
         (out / "config_used" / p.name).write_text(p.read_text(encoding="utf-8"), encoding="utf-8")
     banner = cfg["baseline_label"].lower()
     info = {"created": datetime.now().isoformat(timespec="seconds"), "command": " ".join([Path(sys.executable).name] + sys.argv),
             "git": git_info(), "python": platform.python_version(), "platform": platform.platform(),
             "numpy": np.__version__, "matplotlib": matplotlib.__version__,
-            "config_path": str(cfg_path), "config": cfg, "route_config": route_cfg, "robot_config": robot,
+            "config_path": str(cfg_path), "config_sha256": cfg_sha, "config_is_frozen": config_is_frozen,
+            "frozen_record": frozen, "config": cfg, "route_config_path": args.route_config,
+            "route_config": route_cfg, "robot_config": robot,
             "data_splits": splits, "capture": capture, "split_of_this_capture": split,
             "fusion_run": str(fusion), "tracking_run": fusion_info["tracking_run"],
             "depth_source": fusion_info["config"]["depth_source"]}
@@ -706,6 +812,7 @@ def run(args: argparse.Namespace) -> Path:
             "baseline": cfg["baseline_label"], "baseline_note": cfg["baseline_note"],
             "capture": capture, "split_of_this_capture": split, "data_splits": splits,
             "git": info["git"], "fusion_run": str(fusion), "settings_provenance": cfg["settings_provenance"],
+            "config_sha256": cfg_sha, "config_is_frozen": config_is_frozen,
             "ground_plane_check": gp,
             "definitions": {
                 "position": "Step 4 visible-surface point (per-axis median of selected pixels), world frame, y up. "
@@ -745,6 +852,9 @@ def run(args: argparse.Namespace) -> Path:
                 "route_status": dict(Counter(r["route_status"] for r in rows)),
                 "resets_by_detector_class_and_reason": resets,
                 "resets_total": int(sum(sum(v.values()) for v in resets.values())),
+                "coverage_change_flagged": sum(r["coverage_flag"] for r in rows),
+                "coverage_change_made_unreliable": sum(r["unreliable_reason"] == "mask_coverage_change" for r in rows),
+                "class_changes_raw_vs_voted": class_change_counts(rows),
                 "people_rows": len(people),
                 "people_motion_status": dict(Counter(r["motion_status"] for r in people)),
                 "people_pixel_source": dict(Counter(r["pixel_source"] for r in people)),
@@ -784,7 +894,10 @@ def run(args: argparse.Namespace) -> Path:
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--config", default="configs/motion_office.json")
-    p.add_argument("--no-route", action="store_true", help="ignore the route config: route fields = not_evaluated")
+    p.add_argument("--fusion-run", required=True, help="finished fuse_objects.py run folder")
+    p.add_argument("--route-config", help="explicit corridor config (e.g. a proxy_route); omitted -> not_evaluated")
+    p.add_argument("--frozen-record", default="configs/motion_frozen.json",
+                   help="record of the frozen motion config (sha256); required to match with --final-evaluation")
     p.add_argument("--final-evaluation", action="store_true",
                    help="required to run on a final-evaluation capture (one run, frozen config)")
     run(p.parse_args())

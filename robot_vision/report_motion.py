@@ -5,7 +5,8 @@ Reference data (the Step 4 association and the reference-proxy estimates saved b
 the per-person comparison and for checking whether a reset coincides with a change of reference identity.
 
 Usage (from robot_vision/):
-    python report_motion.py --motion-run outputs/motion_300f_20261013_210331
+    python report_motion.py --motion-run outputs/motion_1388f_<date>_<time>
+    python report_motion.py --motion-run <after> --before-run <before> --label development
 """
 
 from __future__ import annotations
@@ -78,6 +79,8 @@ def window_section(cfg: dict, rows: list[dict]) -> dict:
 
 
 def resets_section(cfg: dict, rows: list[dict], link: dict, reported_total: int) -> tuple[dict, list[dict]]:
+    stored_col = "reset_reason" in rows[0]
+    cls_col = "motion_class" if "motion_class" in rows[0] else "class_name"
     by_track = defaultdict(list)
     for r in rows:
         if r["reliable"] == "True":
@@ -87,7 +90,11 @@ def resets_section(cfg: dict, rows: list[dict], link: dict, reported_total: int)
         obs.sort(key=lambda r: float(r["timestamp"]))
         t = np.array([float(r["timestamp"]) for r in obs])
         xz = np.array([[float(r["raw_world_x"]), float(r["raw_world_z"])] for r in obs])
-        seg, reasons = mo.segment_track(t, xz, [r["class_name"] for r in obs], cfg["motion"])
+        if stored_col:
+            reasons = [r["reset_reason"] for r in obs if r["reset_reason"]]
+            seg = np.cumsum([bool(r["reset_reason"]) for r in obs])
+        else:
+            seg, reasons = mo.segment_track(t, xz, [r[cls_col] for r in obs], cfg["motion"])
         k = 0
         for i in range(1, len(obs)):
             if seg[i] == seg[i - 1]:
@@ -97,7 +104,7 @@ def resets_section(cfg: dict, rows: list[dict], link: dict, reported_total: int)
             ident = "unknown_not_associated" if ra is None or rb is None else (
                 "same_reference_object" if ra == rb else "different_reference_object")
             stored = b.get("reset_reason")
-            events.append({"track_id": tid, "class_before": a["class_name"], "class_after": b["class_name"],
+            events.append({"track_id": tid, "class_before": a[cls_col], "class_after": b[cls_col],
                            "reason": reasons[k], "stored_reset_reason": stored if stored is not None else "",
                            "step_before": int(a["step"]), "step_after": int(b["step"]),
                            "gap_s": round(t[i] - t[i - 1], 4), "ground_jump_m": round(float(np.hypot(*(xz[i] - xz[i - 1]))), 4),
@@ -113,14 +120,17 @@ def resets_section(cfg: dict, rows: list[dict], link: dict, reported_total: int)
         "by_cause": dict(Counter(e["reason"] for e in events)),
         "by_cause_and_detector_class": {k: dict(v) for k, v in by_cause_class.items()},
         "by_detector_class": dict(Counter(e["class_before"] for e in events)),
+        "class_column": cls_col,
+        "source": "reset_reason stored in motion_states.csv" if stored_col else "recomputed with motion.segment_track",
         "class_changes": dict(Counter(f"{e['class_before']} -> {e['class_after']}" for e in events
                                       if e["reason"] == "class_change")),
         "reference_identity_across_reset_eval_only": dict(Counter(e["reference_identity_across_reset"] for e in events)),
         "causes_defined": {
             "gap": f"no reliable observation for more than {cfg['motion']['max_gap_s']} s",
             "jump": f"ground-plane step > {cfg['motion']['jump_base_m']} m + {cfg['motion']['max_plausible_speed_mps']} m/s x dt",
-            "class_change": "the detector class of the track changed",
+            "class_change": "the detector class of the track changed (only when reset_on_class_change is true)",
         },
+        "reset_on_class_change": cfg["motion"].get("reset_on_class_change", True),
         "id_switch_note": ("A ByteTrack ID switch is not observable at inference time: a new ID starts a new track, "
                            "not a reset. Class changes are the inference-side sign of an identity problem. Whether a "
                            "reset coincides with a change of reference object is shown separately (evaluation only)."),
@@ -150,8 +160,8 @@ def per_person_section(cfg: dict, rows: list[dict], link: dict, ref_est: dict) -
     for iid, prs in sorted(people.items()):
         both = [(r, q) for r, q in prs if r["motion_status"] == "estimated" and q["motion_status"] == "estimated"]
         se = [float(r["speed_mps"]) - float(q["speed_mps"]) for r, q in both]
-        de = [angle_diff(float(r["heading_deg"]), float(q["heading_deg"])) for r, q in both
-              if float(r["speed_mps"]) >= ev["direction_min_speed_mps"] and float(q["speed_mps"]) >= ev["direction_min_speed_mps"]]
+        hmin = ev.get("heading_min_speed_mps", ev.get("direction_min_speed_mps"))
+        de = [angle_diff(float(r["heading_deg"]), float(q["heading_deg"])) for r, q in both if float(q["speed_mps"]) >= hmin]
         known = lambda s: s not in ("unknown", "insufficient_history", "")  # noqa: E731
         lab = [(r["motion_label"], q["motion_label"]) for r, q in prs if known(r["motion_label"]) and known(q["motion_label"])]
         ts = [float(r["timestamp"]) for r, _ in both]
@@ -163,6 +173,7 @@ def per_person_section(cfg: dict, rows: list[dict], link: dict, ref_est: dict) -
             "reference_speed_mps": stats(float(q["speed_mps"]) for _, q in both),
             "speed_error_mps": stats(se), "abs_speed_error_mps": stats(abs(x) for x in se),
             "heading_error_deg": stats(de),
+            "heading_pairs_excluded_low_reference_speed": len(both) - len(de),
             "motion_label_agreement": float(np.mean([a == b for a, b in lab])) if lab else None,
             "motion_label_pairs": len(lab),
         }
@@ -195,6 +206,39 @@ def ttr_section(ev: dict, rows: list[dict]) -> dict:
                                  f"lasts {seq:.1f} s and most estimates' 5 s horizon runs past its end (censored). "
                                  "This does not test time-to-route at useful look-ahead times."),
             "sequence_duration_s": seq}
+
+
+KEY_METRICS = [
+    ("people speed abs error median (m/s)", ("evaluation", "people", "abs_speed_error_mps", "median")),
+    ("people speed abs error p90 (m/s)", ("evaluation", "people", "abs_speed_error_mps", "p90")),
+    ("people heading error median (deg)", ("evaluation", "people", "heading_error_deg", "median")),
+    ("people heading error p90 (deg)", ("evaluation", "people", "heading_error_deg", "p90")),
+    ("people heading pairs excluded (ref speed low)", ("evaluation", "people", "heading_pairs_excluded_low_reference_speed")),
+    ("people motion-label agreement", ("evaluation", "people", "motion_label_agreement")),
+    ("people pairs with both estimates", ("evaluation", "people", "pairs_with_both_estimates")),
+    ("static verified: estimates", ("evaluation", "static_control", "static_verified", "estimates")),
+    ("static verified: false-motion rate", ("evaluation", "static_control", "static_verified", "false_motion_rate")),
+    ("static verified: labelled estimates", ("evaluation", "static_control", "static_verified", "labelled")),
+    ("static verified: speed median (m/s)", ("evaluation", "static_control", "static_verified", "speed_mps", "median")),
+    ("static unverified: false-motion rate", ("evaluation", "static_control", "static_unverified", "false_motion_rate")),
+    ("resets total", ("coverage", "resets_total")),
+    ("reliable observations", ("coverage", "reliable")),
+    ("estimated observations", ("coverage", "motion_status", "estimated")),
+    ("trusted observations", ("coverage", "motion_trusted_rows")),
+    ("coverage-change flagged", ("coverage", "coverage_change_flagged")),
+]
+
+
+def dig(d, path):
+    for k in path:
+        if not isinstance(d, dict) or k not in d:
+            return None
+        d = d[k]
+    return d
+
+
+def before_after(before: dict, after: dict) -> list[dict]:
+    return [{"metric": name, "before": dig(before, p), "after": dig(after, p)} for name, p in KEY_METRICS]
 
 
 def write_markdown(rep: dict, path: Path) -> None:
@@ -237,12 +281,52 @@ def write_markdown(rep: dict, path: Path) -> None:
     L += ["", "## Time to route", "", f"**{t['verdict']}**", "",
           f"- Evaluated entries: {t.get('entries_evaluated')}; censored cases reported separately: {t.get('censored_total')} "
           f"{t.get('censored')}.", f"- {t.get('why_inconclusive', '')}"]
+    L += extra_markdown(rep)
     path.write_text(rp.portable_text("\n".join(L) + "\n", rp.active_roots())[0], encoding="utf-8")
+
+
+def fmtv(v):
+    if v is None:
+        return "—"
+    if isinstance(v, float):
+        return f"{v:.3f}"
+    return str(v)
+
+
+def extra_markdown(rep: dict) -> list[str]:
+    L = ["", "## Capture", "", f"- {rep['capture_facts']}", f"- Config sha256 {rep['config_sha256']} "
+         f"(frozen: {rep['config_is_frozen']})", f"- Coverage-change rule: {rep['coverage_change']}",
+         f"- Class changes between consecutive observations, detector vs voted: {rep['class_changes_raw_vs_voted']}",
+         "", "## By distance bin (camera_proxy to visible-surface point)", "",
+         "| Bin | Observations | Invalid positions | Reliable | Estimated | Trusted | People obs | People invalid | "
+         "People pairs | People abs speed error median | People heading error median (excluded) | People label agreement |",
+         "|---|---|---|---|---|---|---|---|---|---|---|---|"]
+    for b, v in rep["by_distance_bin"].items():
+        a, p, c = v["all_observations"], v["people_observations"], v["people_vs_reference"]
+        L.append(f"| {b} | {a['observations']} | {a['invalid_positions']} | {a['reliable']} | {a['estimated']} | "
+                 f"{a['trusted']} | {p['observations']} | {p['invalid_positions']} | {c['pairs_with_both_estimates']} | "
+                 f"{fmtv(c['abs_speed_error_mps'].get('median'))} | {fmtv(c['heading_error_deg'].get('median'))} "
+                 f"({c['heading_pairs_excluded_low_reference_speed']}) | {fmtv(c['motion_label_agreement'])} |")
+    t = rep["time_to_route_by_lookahead"]
+    if isinstance(t, dict):
+        L += ["", "## Time to route by estimated look-ahead (censored separately)", "",
+              "| Bin | Outcomes | Censored | Error median (s) | Error p90 (s) |", "|---|---|---|---|---|"]
+        for b, v in t.items():
+            e = v["error_s_estimated_minus_realized"]
+            L.append(f"| {b} | {v['outcomes']} | {v['censored_separately']} | {fmtv(e.get('median'))} | {fmtv(e.get('p90'))} |")
+    if rep.get("before_after"):
+        L += ["", f"## Before / after ({rep['before_after_label']})", "",
+              f"Before: {rep['before_run']} — after: {rep['motion_run']}", "",
+              "| Metric | Before | After |", "|---|---|---|"]
+        L += [f"| {r['metric']} | {fmtv(r['before'])} | {fmtv(r['after'])} |" for r in rep["before_after"]]
+    return L
 
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--motion-run", required=True)
+    p.add_argument("--before-run", help="earlier motion run on the same capture, for a before/after table")
+    p.add_argument("--label", default="", help="label for the before/after table, e.g. development")
     a = p.parse_args()
     run = resolve(a.motion_run)
     if not (run / "COMPLETE").exists():
@@ -266,7 +350,21 @@ def main() -> None:
         "resets": resets,
         "per_person": per_person_section(cfg, rows, link, ref_est),
         "time_to_route": ttr_section(ev, rows),
+        "capture_facts": ev["evaluation"].get("capture_facts"),
+        "config_sha256": ev.get("config_sha256"), "config_is_frozen": ev.get("config_is_frozen"),
+        "coverage_change": {k: ev["coverage"].get(k) for k in ("coverage_change_flagged", "coverage_change_made_unreliable")},
+        "class_changes_raw_vs_voted": ev["coverage"].get("class_changes_raw_vs_voted"),
+        "by_distance_bin": ev["evaluation"].get("by_distance_bin", {}),
+        "time_to_route_by_lookahead": (ev["evaluation"]["time_to_route"].get("by_estimated_lookahead_bin")
+                                       if isinstance(ev["evaluation"]["time_to_route"], dict) else "not_evaluated"),
     }
+    if a.before_run:
+        b = resolve(a.before_run)
+        bev = json.loads((b / "motion_evaluation.json").read_text(encoding="utf-8"))
+        if bev["capture"] != ev["capture"]:
+            raise SystemExit(f"Before run is on {bev['capture']}, after run on {ev['capture']}")
+        rep.update({"before_run": str(b), "before_after_label": a.label or ev["split_of_this_capture"],
+                    "before_after": before_after(bev, ev)})
     out = resolve(office["output_root"]) / f"motion_supplement_{datetime.now():%Y%m%d_%H%M%S}"
     out.mkdir(parents=True)
     write_json(out / "motion_supplement.json", rep)
