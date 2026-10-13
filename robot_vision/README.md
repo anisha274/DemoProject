@@ -29,6 +29,8 @@ The teammate's gesture code lives in a separate repository
 | `configs/fusion_office.json` | Inputs, pixel-selection rules, floor-context rule and evaluation settings for `fuse_objects.py`. |
 | `configs/robot.json` | Provisional robot width (0.60 m) and safety margin per side (0.10 m); load dimensions to come from Unity. |
 | `tests/test_fuse_objects.py` | Unit tests for the pose convention, pixel selection and point-to-box distance. |
+| `report_step4.py` | Step 4 report supplement: calibration used, fitted parameters, all-class table, unmatched-couch classification, timing and step sizes. Reads a fusion run; never modifies it. |
+| `configs/data_splits.json` | Office/dynamic split: Capture_1 development, Capture_2 adjustment, Capture_3/4 final evaluation only. |
 
 ## Setup
 
@@ -270,6 +272,16 @@ How it was established (`validate_depth.py`):
 
 Outputs: `outputs/depth_check_<date>_<time>/depth_validation_report.json` and `depth_vs_3d_boxes.png`.
 
+## Data splits (Office/dynamic)
+
+Recorded in `configs/data_splits.json` and copied into every report.
+
+| Capture | Role | Earlier use |
+|---|---|---|
+| Capture_1 | development | Stages 1–4; Stage 3 depth/FOV fit |
+| Capture_2 | adjustment: the only capture on which a parameter may be adjusted | Stage 3 held-out depth test only |
+| Capture_3, Capture_4 | final evaluation: one run with a frozen config | not used |
+
 ## Stage 4: tracked-object 3D fusion (reference-depth baseline)
 
 ```powershell
@@ -294,6 +306,38 @@ positions are read only by the geometry checks and the evaluation.
   sensors share the pose. Static 3D boxes stay fixed in the world under this convention, and move by metres
   under the transposed one.
 
+**Calibration actually used** (recorded in each run's `run_info.json`):
+- Intrinsics: `fx = fy = 458.9935`, `cx = 365.0`, `cy = 265.0` for 730×530 px. Source: square-pixel pinhole from a
+  60° vertical field of view, principal point at the image centre: `fy = (H/2) / tan(vfov/2)`, `fx = fy`,
+  `cx = W/2`, `cy = H/2` (`configs/depth_thud_synthetic.json`, `thud_depth.pixel_intrinsics`).
+- Back-projection of pixel (column `u`, row `v`; pixel centre at index + 0.5) with planar depth `Z`:
+  `x = (u + 0.5 − cx)·Z / fx`, `y = −(v + 0.5 − cy)·Z / fy`, `z = Z`.
+- World transform: `p_world = R(q)·p_cam + t`, with `q` the sensor rotation stored as `[x, y, z, w]` and `t` the
+  sensor translation in metres. Ego pose is identity in this capture.
+- Depth: `depth_m = raw / 65535 × 10.0`, planar Z along the optical axis. `raw = 65535` is invalid (at or beyond
+  10 m). Evidence: reference-instance points fall inside reference 3D boxes (chairs 100% at 0 cm, desks 100%
+  within 0.5 cm, Gym classes 100% within 2 cm). Millimetres put 0% inside, ray distance 25–42%.
+- The metadata `camera_intrinsic` (1013.89 / 1520.83) was rejected because it is not in pixel units.
+  Back-projecting with it puts only 6–16% of points inside their boxes. Projecting 3D boxes with it gives
+  median IoU 0 against the 2D boxes, versus 0.72–0.82 with the 60° model.
+
+**Parameters fitted on reference boxes.** Two were: the depth far plane (fitted 9.966 m, used 10.0) and the
+vertical FOV (fitted 60.27°, used 60.0).
+- The fit used **Office/dynamic/Capture_1**, the same capture Step 4 is evaluated on.
+- The rounded values were then confirmed unchanged on four held-out captures: Office/dynamic/Capture_2,
+  Office/static/Capture_1, and Gym dynamic and static. That is the independent evidence for the calibration.
+- Step 4's inside-3D-box rates on Capture_1 are therefore **not** independent of the calibration.
+- Nothing else was fitted. Pixel-selection rules, thresholds and the association IoU were set before the full
+  run and were not tuned on reference data.
+
+**What the checks do and do not show.**
+- The static-box check verifies the pose convention: 3D boxes stay fixed to about 1 µm under `R(q)·p + t` and
+  move by metres under the transpose. It does **not** show micrometre-level perception accuracy.
+- Stored axes: `cam_x/cam_y/cam_z` are camera-frame metres (x right, y up, z forward; Unity, left-handed).
+  `world_x/world_y/world_z` are Unity world metres with **y up**, so the ground plane is world x–z.
+- With rendered reference depth, the estimate and the reference point come from the same depth map. So
+  **visible-point error measures pixel-selection / segmentation error, not depth error.**
+
 **What a position is.** For each tracked box, pixels are chosen from the *predicted* mask:
 1. the detector's own class (person, chair, couch→sofa);
 2. otherwise box pixels that are not wall, floor or ceiling;
@@ -313,23 +357,69 @@ box's bottom edge. `bottom_height_above_floor_m` uses the floor height measured 
 - *World spread.* Spread of a static object's track position, compared with the same spread for the
   reference visible point.
 
-| 300 frames, run `fuse_300f_20261011_042733` | Result |
+Run `fuse_300f_20261011_042733` (300 frames, development capture):
+
+| Summary | Result |
 |---|---|
 | Tracked observations / valid 3D positions | 1903 / 1793 |
 | Associated with a reference object (valid position) | 1380 |
 | Visible-point error, all classes: median / p90 | 0.07 m / 0.41 m |
-| People (546): median / p90 | 0.02 m / 0.20 m |
-| Chairs (369): median, point inside 3D box (+5 cm) | 0.13 m, 94% |
-| Sofas (98): median, inside 3D box | 0.40 m, 66% |
 | Static-object track spread in world: estimate vs reference visible point | 0.20 m vs 0.06 m |
+
+Every associated class (rows sum to 1380):
+
+| Reference label | Associated (valid) | Visible-point error n | median | p90 | With 3D box | Inside 3D box (+5 cm) |
+|---|---|---|---|---|---|---|
+| people | 546 | 546 | 0.023 m | 0.201 m | 0 | — |
+| Chair | 379 | 369 | 0.129 m | 0.663 m | 369 | 94% |
+| Computer | 328 | 328 | 0.063 m | 0.188 m | 0 | — |
+| Sofa | 98 | 98 | 0.398 m | 0.602 m | 98 | 66% |
+| Plants | 22 | 22 | 0.113 m | 0.138 m | 0 | — |
+| Book | 7 | 7 | 0.053 m | 0.060 m | 0 | — |
+
+Chair has 10 associated observations with no visible-point error, because their reference instance had
+fewer than 20 valid-depth pixels.
+
+**The 263 unmatched couch boxes** (10 tracks) are classified by the reference 2D box, of any label, that they
+overlap most:
+
+| Category | Boxes |
+|---|---|
+| Same label (Sofa), IoU < 0.5 (median 0.42) | 185 |
+| Another label: Chair (41 of these with IoU ≥ 0.5, i.e. the detector called a chair a couch) | 48 |
+| Same label, IoU ≥ 0.5, but that sofa was already matched to another couch track (duplicate box) | 30 |
+| No overlap with any reference box | 0 |
+
+**Timing and frame-to-frame world step.**
+- Timing: 300 frames, median dt 0.0166 s (60.24 Hz), constant.
+- Ground-plane (x–z) step between consecutive valid positions of one track:
+
+| Group | Step pairs | Median | p90 | Max |
+|---|---|---|---|---|
+| People | 570 | 0.016 m | 0.026 m | 3.25 m |
+| Static (Chair / Desk / Sofa) | 768 | 0.025 m | 0.234 m | 5.38 m |
+
+- For static objects the true step is 0, so their step size is pure pixel-selection jitter. It is larger than a
+  walking person's step, which is why Step 8 estimates velocity over a time window, not from adjacent frames.
+- Groups come from each track's most frequent associated reference label, used for evaluation only.
 
 Failure modes seen:
 - The box-minus-background fallback can pick an object behind or in front of the target. This causes the
   multi-metre outliers.
 - Predicted sofa pixels cover only part of the sofa.
-- 263 couch boxes match no reference sofa box at IoU 0.5.
 
 The selection rules were fixed before the full run and were not tuned on these results.
+
+Supplement (does not modify the fusion run):
+
+```powershell
+.\.venv\Scripts\python.exe report_step4.py --fusion-run outputs\fuse_300f_20261011_042733 --depth-validation-run outputs\depth_check_20261011_031941
+```
+
+It writes `outputs/step4_supplement_<date>_<time>/`:
+- `step4_supplement.json` and `step4_report.md`: calibration, fitted parameters, per-class table, couch
+  classification, timing.
+- `couch_unmatched.csv`.
 
 ## Known limitations
 

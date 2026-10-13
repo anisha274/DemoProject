@@ -11,9 +11,11 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+import thud_data as td  # noqa: E402
 import thud_depth as tdd  # noqa: E402
 
-CAPTURE = Path(r"D:\RGB-D\Synthetic_Scenes\Office\dynamic\Capture_1")
+# dataset location from configs/office.json (or THUD_DATASET_ROOT); no drive letter in code
+CAPTURE = Path(td.load_config(ROOT / "configs" / "office.json")["capture_dir"])
 
 
 class DecodeTests(unittest.TestCase):

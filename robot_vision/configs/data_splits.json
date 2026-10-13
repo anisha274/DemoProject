@@ -1,0 +1,20 @@
+{
+  "scene": "Synthetic_Scenes/Office/dynamic",
+  "splits": {
+    "development": ["Capture_1"],
+    "adjustment": ["Capture_2"],
+    "final_evaluation": ["Capture_3", "Capture_4"]
+  },
+  "rules": [
+    "development (Capture_1): existing Stage 1-4 outputs; code is developed and checked here.",
+    "adjustment (Capture_2): the only capture on which any parameter may be adjusted.",
+    "final_evaluation (Capture_3, Capture_4): untouched until one final evaluation with a frozen config."
+  ],
+  "prior_use": {
+    "Capture_1": "Stage 1-4 development runs; Stage 3 fit of depth far plane and vertical FOV against reference 3D boxes.",
+    "Capture_2": "Stage 3 held-out depth/intrinsics test only. No parameter has been adjusted on it.",
+    "Capture_3": "not used",
+    "Capture_4": "not used"
+  },
+  "final_evaluation_done": false
+}
