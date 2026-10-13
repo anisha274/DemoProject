@@ -37,6 +37,10 @@ The teammate's gesture code lives in a separate repository
 | `configs/motion_office.json` | Step 8 settings (fixed before evaluation), input runs and config paths. |
 | `configs/proxy_route_office_capture1.json` | The THUD `proxy_route` corridor: 16-point centreline, 3.70 m long, 0.80 m wide. |
 | `tests/test_motion.py` | Unit tests for `motion.py`. |
+| `report_motion.py` | Step 8 supplement from a motion run: velocity window and delay, resets by cause and class, per-person errors, time-to-route verdict. |
+| `run_paths.py` | Portable paths: run folders store `{dataset_root}/…`, `{output_root}/…`, `{project_root}/…` and resolve them on the current machine. |
+| `migrate_run_paths.py` | Rewrites absolute paths in existing run folders as portable tokens, with a backup of each original file. |
+| `tests/test_run_paths.py` | Path round trip, migration, loading a run under a different dataset root, no absolute paths in `outputs/`. |
 
 ## Setup
 
@@ -278,6 +282,39 @@ How it was established (`validate_depth.py`):
 
 Outputs: `outputs/depth_check_<date>_<time>/depth_validation_report.json` and `depth_vs_3d_boxes.png`.
 
+## Portable run folders
+
+Run outputs never store absolute paths (`run_paths.py`). Paths are written as a root token plus a POSIX
+relative path, and resolved against the roots configured on the machine reading them:
+
+| Token | Root on the current machine |
+|---|---|
+| `{dataset_root}/Synthetic_Scenes/...` | `--dataset-root`, `THUD_DATASET_ROOT`, or `dataset_root` in `configs/office.json` |
+| `{output_root}/track_300f_...` | `output_root` in the config (default `robot_vision/outputs`) |
+| `{project_root}/configs/office.json` | the `robot_vision` folder |
+
+Every JSON a run writes passes through the same function, so commands, notes and tracebacks are tokenised too.
+A path outside every root is reduced to `<outside configured roots>/<file name>`.
+
+Folders written before this rule are migrated without rerunning anything:
+
+```powershell
+.\.venv\Scripts\python.exe migrate_run_paths.py --all --dry-run   # list the files that would change
+.\.venv\Scripts\python.exe migrate_run_paths.py --all
+```
+```bash
+.venv/bin/python migrate_run_paths.py --all --old-dataset-root 'D:\RGB-D' --old-output-root 'E:\RobotVisionWorkspace\robot_vision\outputs' --old-project-root 'E:\RobotVisionWorkspace\robot_vision'
+```
+
+The second form migrates folders copied from another machine.
+- Each original file is copied once to `<run>/_path_migration_backup/` and never overwritten.
+- `path_migration.json` lists the changed files.
+- Images are not touched.
+
+All 11 run folders here were migrated (21 files). Every rewritten value resolves back to its original path.
+Rerunning `verify_tracking_run.py` and a 3-frame `fuse_objects.py --check-only` on the migrated inputs passes,
+and gives an `object_states.csv` byte-identical to the original.
+
 ## Data splits (Office/dynamic)
 
 Recorded in `configs/data_splits.json` and copied into every report.
@@ -323,6 +360,11 @@ positions are read only by the geometry checks and the evaluation.
 - Depth: `depth_m = raw / 65535 × 10.0`, planar Z along the optical axis. `raw = 65535` is invalid (at or beyond
   10 m). Evidence: reference-instance points fall inside reference 3D boxes (chairs 100% at 0 cm, desks 100%
   within 0.5 cm, Gym classes 100% within 2 cm). Millimetres put 0% inside, ray distance 25–42%.
+- Field-of-view check: `fy = 458.99` with `cy = 265` gives `2·atan(cy/fy) = 60.0°`, Unity's default vertical
+  camera field of view.
+- Far plane: the fitted 9.966 m is within 0.34% of a round 10 m. The round value fits the held-out captures at
+  least as well, so a 10 m depth range is the likely capture setting. It is not Unity's default far clip plane
+  (1000 m), and the metadata does not state it, so this remains an inference from the fit.
 - The metadata `camera_intrinsic` (1013.89 / 1520.83) was rejected because it is not in pixel units.
   Back-projecting with it puts only 6–16% of points inside their boxes. Projecting 3D boxes with it gives
   median IoU 0 against the 2D boxes, versus 0.72–0.82 with the 60° model.
@@ -435,6 +477,7 @@ Windows PowerShell:
 cd E:\RobotVisionWorkspace\robot_vision
 .\.venv\Scripts\python.exe make_proxy_route.py --fusion-run outputs\fuse_300f_20261011_042733 --out configs\proxy_route_office_capture1.json
 .\.venv\Scripts\python.exe estimate_motion.py
+.\.venv\Scripts\python.exe report_motion.py --motion-run outputs\motion_300f_<date>_<time>
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
@@ -445,6 +488,7 @@ cd /path/to/RobotVisionWorkspace/robot_vision
 export THUD_DATASET_ROOT=/Volumes/Data/RGB-D
 .venv/bin/python make_proxy_route.py --fusion-run outputs/fuse_300f_20261011_042733 --out configs/proxy_route_office_capture1.json
 .venv/bin/python estimate_motion.py
+.venv/bin/python report_motion.py --motion-run outputs/motion_300f_<date>_<time>
 .venv/bin/python -m unittest discover -s tests -v
 ```
 
@@ -475,8 +519,12 @@ ground plane is world x–z. The camera stays 1.219 m above the floor.
   using real timestamps. It needs at least 10 observations spanning 0.3 s; otherwise the status is
   `insufficient_history`.
 - The line's value at the current time is the filtered position. Raw and filtered positions are both saved.
-- **Delay:** for a changing velocity the estimate describes the window's mean time, about 0.25 s ago (measured
-  median 0.249 s). Label persistence adds up to 0.2 s.
+- **Window:** 0.5 s = 30.1 frame intervals at 60.24 Hz, so up to 31 observations (observed median 31). The
+  minimum is 10 observations spanning 0.3 s (18 frames). The first estimate comes a median 0.32 s after a
+  segment starts.
+- **Delay:** for a changing velocity the estimate describes the window's mean time, about 0.25 s (15 frames) ago;
+  the measured median is 0.249 s. Label persistence adds up to 0.2 s (12 frames), so a label can trail a real
+  change by up to 0.45 s.
 - **Resets** start a new segment when one of these happens: a gap over 0.2 s; a jump over 0.5 m + 3 m/s × dt;
   a detector class change.
 - Uncertainty is the line-fit standard error. It assumes independent residuals, so it understates slow
@@ -512,7 +560,9 @@ ground plane is world x–z. The camera stays 1.219 m above the floor.
 - Its velocity, from the same estimator, is a **proxy**, not the person-centre velocity.
 - Tracks link to instances through the Step 4 per-frame association.
 
-Run `motion_300f_20261013_210331` (development capture; code commit d247bba):
+Accepted baseline run `motion_300f_20261013_210331` (development capture; code commit d247bba). The current run
+`motion_300f_20261013_214008` (commit 5948eff) reproduces every value and adds the `reset_reason` and
+`motion_trusted` columns.
 
 | People (607 observations) | Result |
 |---|---|
@@ -523,10 +573,46 @@ Run `motion_300f_20261013_210331` (development capture; code commit d247bba):
 | Heading error (both ≥ 0.3 m/s): median / p90 / max | 0.75° / 5.7° / 132° |
 | `motion_label` agreement with proxy | 99.0% (386 pairs; 4 `moving_away` → `moving_lateral`) |
 | `range_label` agreement | 97.9% |
-| Resets (person tracks) | 7, all jumps; 71 over all classes |
 | Identity | 4 people instances; one is split across 3 tracks, one across 2; 3 of 36 tracks switch reference ID (11 switches) |
-| Time to route (people), estimated − realized entry | median 0.014 s, max 0.042 s (n = 23, realized entry median 0.22 s ahead) |
-| Time-to-route outcomes | 23 entered; 38 `crossing_route` and 227 `not_crossing` censored (sequence ended within 5 s); no false alarm or miss observed |
+
+**n_people = 4, and frames are highly correlated.** Frames are 1/60 s apart, and consecutive estimates share
+most of their 0.5 s window, so the pair counts above overstate the independent evidence.
+
+Per person (`report_motion.py`):
+
+| Reference person | Tracks | Pairs | ~Independent 0.5 s windows | Abs speed error median / p90 / max | Heading error median / p90 / max | Label agreement |
+|---|---|---|---|---|---|---|
+| 36 | 1 | 244 | 8.1 | 0.010 / 0.024 / 0.04 m/s | 0.4° / 1.7° / 3° | 100% of 231 |
+| 78 | 63, 191 | 181 | 7.7 | 0.035 / 0.117 / 0.33 m/s | 2.5° / 7.2° / 23° | 97% of 155 |
+| 41 | 112, 173, 236 | 10 | 0.3 | 0.45 / 1.07 / 1.28 m/s | 128° / 131° / 132° | — |
+| 45 | 137 | 0 (17 associated) | — | — | — | — |
+
+- Person 41 is the weak case: about 10 m away, in short fragments.
+- Person 45 has no motion pairs: all 17 positions are invalid, and its reference mask never has 50 valid-depth
+  pixels.
+- The overall averages are dominated by persons 36 and 78.
+
+**Resets (71), by cause and detector class** (class before the reset):
+
+| Cause | person | chair | couch | tv | laptop | remote | book | bench | Total |
+|---|---|---|---|---|---|---|---|---|---|
+| Class change | 2 | 9 | 8 | 9 | 8 | 6 | 5 | 2 | 49 |
+| Position jump | 7 | 0 | 7 | 1 | 0 | 0 | 0 | 0 | 15 |
+| Observation gap | 1 | 3 | 3 | 0 | 0 | 0 | 0 | 0 | 7 |
+
+- **ID switch** is not a reset cause the system can observe. ByteTrack never reports a switch: a new ID starts a
+  new track rather than resetting one.
+- A class change is the inference-side sign of an identity problem. The commonest are tv ↔ laptop (16),
+  chair ↔ couch (11) and remote ↔ book (10).
+- Evaluation only: 22 resets keep the same reference object on both sides, and 49 are on unassociated
+  observations. **None** coincides with a change of reference object.
+
+**Time to route: inconclusive: 23 entries, ~0.22 s horizon, 5 s sequence.**
+- The 23 entries that could be checked were only a median 0.22 s ahead. There, estimated − realized is a median
+  0.014 s, max 0.042 s.
+- The **265 censored cases** are reported separately: 38 `crossing_route` and 227 `not_crossing`. In each, the
+  5 s horizon ran past the end of the sequence.
+- No false alarm or miss was observed. This does not test time-to-route at useful look-ahead times.
 
 Static-furniture control: the same estimator on objects whose true velocity is 0.
 
@@ -543,14 +629,34 @@ Static-furniture control: the same estimator on objects whose true velocity is 0
   walks past.
 - People give good results because the person mask is compact and stable: Step 4 visible-point error was
   0.02 m.
-- Furniture motion labels should not be trusted. A rule against mask-coverage changes would be the next
-  candidate, but it may only be tuned on Capture_2. **No setting was changed after these results.**
+- **No setting was changed after these results.**
+
+**Motion trust** (design decision, not tuning; `configs/motion_office.json` → `motion_trust`):
+- `motion_trusted` is true only for an estimated motion of a detector class in `dynamic_classes` (default:
+  `person`).
+- Other classes keep their motion values, with `motion_trusted = false`. In the current run that is 437
+  trusted person estimates, and 285 untrusted estimates (tv, chair, couch).
+- **For Step 9:** decision rules use only trusted motion. Static obstacles enter decisions through the
+  passage-width map, not through motion labels.
+- **Why:** the furniture error is systematic drift, not noise. Two things cause it:
+  - The predicted mask's coverage changes, as with chair track 212.
+  - The visible-surface point depends on the viewpoint. Even the reference visible point shows 46% false motion.
+- Both drifts follow the camera's path. A longer window averages noise but cannot remove drift that persists
+  for seconds.
+
+**Waiting for your confirmation (not started):** two candidate rules, to be developed only on the full Capture_2
+in one inference run and then frozen:
+- a mask-coverage-change rule;
+- an uncertainty-scaled "moving" threshold.
+
+Supplement: `outputs/motion_supplement_<date>_<time>/` holds `motion_supplement.json`, `motion_supplement.md` and
+`resets.csv` (one row per reset).
 
 Outputs in `outputs/motion_300f_<date>_<time>/`:
 
 | File | Content |
 |---|---|
-| `motion_states.csv` | One row per tracked observation: quality fields, raw and filtered world position, velocity ± SE, speed, heading, window size/span/lag, resets, labels, camera_proxy range and rates, route status, time-to-route p10/p90 |
+| `motion_states.csv` | One row per tracked observation: quality fields, raw and filtered world position, velocity ± SE, speed, heading, window size/span/lag, resets and `reset_reason`, labels, `motion_trusted`, camera_proxy range and rates, route status, time-to-route p10/p90 |
 | `motion_evaluation.json` | Baseline label, split, git commit, ground-plane check, definitions, coverage, evaluation |
 | `reference_motion_eval_only.csv` | The reference-proxy estimates (evaluation only) |
 | `birdseye_trajectories.png` | Camera path, proxy route corridor, person tracks (raw and filtered), reference proxies, static tracks |
@@ -564,13 +670,13 @@ Outputs in `outputs/motion_300f_<date>_<time>/`:
   monocular or relative depth model are not validated.
 - Steps 4 and 8 are a **reference-depth and reference-camera-pose baseline**. They do not measure an RGB-only
   depth model or an estimated camera pose.
-- Step 8 is evaluated on one 5 s development excerpt with 4 people. Most time-to-route cases are censored by
-  the end of the sequence.
+- Step 8 is evaluated on one 5 s development excerpt with 4 people (3 with motion pairs), and frames are highly
+  correlated. Time-to-route evaluation is inconclusive.
 - The reference is a visible-surface proxy, not person-centre ground truth. Capture_3 and Capture_4 have not
   been used.
 - No passage width, clearance, occupancy map or movement decision is computed yet. `camera_proxy` is not the
   robot position.
-- Earlier runs store absolute Windows paths in `frames.jsonl`. To rerun Stages 1–4 on macOS, regenerate those
-  runs there. Step 8 reads RGB file names from the dataset metadata, not from those paths.
+- Portability is tested with synthetic run folders and on Windows. It has not yet been run on a real macOS
+  machine.
 - Semantic labels are used only as evaluation references, never as model input.
 - Real-scene (`Real_Scenes/store`) captures use a different layout and are not supported yet.

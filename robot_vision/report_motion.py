@@ -129,15 +129,24 @@ def resets_section(cfg: dict, rows: list[dict], link: dict, reported_total: int)
 
 def per_person_section(cfg: dict, rows: list[dict], link: dict, ref_est: dict) -> dict:
     ev = cfg["evaluation"]
-    people = defaultdict(list)
+    people, associated = defaultdict(list), defaultdict(list)
     for r in rows:
         a = link.get((int(r["step"]), r["track_id"]))
         if a is None or a[1] not in ev["person_reference_labels"]:
             continue
+        associated[a[0]].append(r)
         q = ref_est.get((a[0], int(r["step"])))
         if q is not None:
             people[a[0]].append((r, q))
     out = {}
+    for iid, rs in sorted(associated.items()):
+        if iid not in people:
+            out[str(iid)] = {"tracks": sorted({r["track_id"] for r in rs}, key=int), "associated_observations": len(rs),
+                             "pairs_with_both_estimates": 0,
+                             "why_no_pairs": {"track_motion_status": dict(Counter(r["motion_status"] for r in rs)),
+                                              "track_unreliable_reasons": dict(Counter(r["unreliable_reason"] for r in rs if r["unreliable_reason"])),
+                                              "reference_proxy": f"fewer than {ev['reference_min_pixels']} valid-depth "
+                                                                 "instance pixels in every frame (no reference trajectory)"}}
     for iid, prs in sorted(people.items()):
         both = [(r, q) for r, q in prs if r["motion_status"] == "estimated" and q["motion_status"] == "estimated"]
         se = [float(r["speed_mps"]) - float(q["speed_mps"]) for r, q in both]
@@ -157,8 +166,9 @@ def per_person_section(cfg: dict, rows: list[dict], link: dict, ref_est: dict) -
             "motion_label_agreement": float(np.mean([a == b for a, b in lab])) if lab else None,
             "motion_label_pairs": len(lab),
         }
-    return {"n_people": len(out), "people": out,
-            "statement": (f"n_people = {len(out)}. Consecutive estimates are highly correlated: frames are 1/60 s apart "
+    with_pairs = sum(1 for v in out.values() if v["pairs_with_both_estimates"])
+    return {"n_people": len(out), "n_people_with_motion_pairs": with_pairs, "people": out,
+            "statement": (f"n_people = {len(out)} associated reference people, {with_pairs} with motion pairs. Consecutive estimates are highly correlated: frames are 1/60 s apart "
                           f"and each estimate shares most of its {cfg['motion']['window_s']} s window with the next, so "
                           "the pair counts overstate the independent evidence. approx_independent_windows = covered "
                           "time / window length is a rough count of non-overlapping windows.")}
@@ -211,6 +221,12 @@ def write_markdown(rep: dict, path: Path) -> None:
           "| Reference person | Tracks | Pairs | ~independent windows | Ref speed median | Abs speed error median / p90 / max | Heading error median / p90 / max | Label agreement |",
           "|---|---|---|---|---|---|---|---|"]
     for iid, v in p["people"].items():
+        if not v["pairs_with_both_estimates"]:
+            why = v["why_no_pairs"]
+            L.append(f"| {iid} | {', '.join(v['tracks'])} | 0 of {v['associated_observations']} associated | — | — | "
+                     f"no pairs: track {why['track_unreliable_reasons'] or why['track_motion_status']}; reference "
+                     f"{why['reference_proxy']} | — | — |")
+            continue
         s, h = v["abs_speed_error_mps"], v["heading_error_deg"]
         fmt = lambda d, k, f: format(d[k], f) if d.get("n") else "—"  # noqa: E731
         L.append(f"| {iid} | {', '.join(v['tracks'])} | {v['pairs_with_both_estimates']} | {v['approx_independent_windows']} | "
