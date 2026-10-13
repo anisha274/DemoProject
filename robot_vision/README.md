@@ -41,6 +41,13 @@ The teammate's gesture code lives in a separate repository
 | `run_paths.py` | Portable paths: run folders store `{dataset_root}/…`, `{output_root}/…`, `{project_root}/…` and resolve them on the current machine. |
 | `migrate_run_paths.py` | Rewrites absolute paths in existing run folders as portable tokens, with a backup of each original file. |
 | `tests/test_run_paths.py` | Path round trip, migration, loading a run under a different dataset root, no absolute paths in `outputs/`. |
+| `data_splits.py` | Split lookup and the `--final-evaluation` guard used by every script that reads a capture. |
+| `configs/motion_office_v1_equivalent.json` | Step 8 v1 settings expressed for the current code (development before/after only); reproduces the accepted baseline exactly. |
+| `configs/motion_office_k2_candidate.json` | `uncertainty_k = 2` candidate, evaluated once on Capture_2 for the declared k decision. |
+| `configs/proxy_route_office_capture2.json` | `proxy_route` corridor from the Capture_2 camera path. |
+| `configs/motion_frozen.json` | Frozen motion config: file name and SHA-256; required by `estimate_motion.py --final-evaluation`. |
+| `tests/test_device_and_splits.py` | Device selection CUDA → MPS → CPU with mocked availability; split guard. |
+| `../.github/workflows/tests.yml` | GitHub Actions: unit tests on windows-latest and macos-latest (runs when pushed). |
 
 ## Setup
 
@@ -89,7 +96,10 @@ cd E:\RobotVisionWorkspace\robot_vision
 
 Useful options: `--start N` (first matched frame index), `--capture <path>` (relative to the dataset root or
 absolute), `--dataset-root`, `--output-root`. `--device cuda|mps|cpu` never falls back to another device;
-`--device auto` picks CUDA, then MPS, then CPU. Batch size is 1.
+`--device auto` (the default of `run_segmentation.py`, `track_objects.py` and `check_environment.py`) picks CUDA,
+then MPS, then CPU: `check_environment.select_device()`, lines 36–41. `tests/test_device_and_splits.py`
+checks that order with mocked CUDA/MPS availability, and that explicit modes never fall back. Batch size is 1.
+Use `--all-frames` to process every usable frame of a capture.
 
 The model weights download once into the Hugging Face cache in your user profile
 (`%USERPROFILE%\.cache\huggingface`), outside this repository.
@@ -315,15 +325,37 @@ All 11 run folders here were migrated (21 files). Every rewritten value resolves
 Rerunning `verify_tracking_run.py` and a 3-frame `fuse_objects.py --check-only` on the migrated inputs passes,
 and gives an `object_states.csv` byte-identical to the original.
 
-## Data splits (Office/dynamic)
+## Continuous integration
 
-Recorded in `configs/data_splits.json` and copied into every report.
+`.github/workflows/tests.yml` (repository root) runs `python -m unittest discover -s tests -v` in `robot_vision/`
+on `windows-latest` and `macos-latest` with Python 3.12, a CPU PyTorch build and `requirements.txt`. It runs on
+push and pull request. The runners have no THUD data and no `outputs/`, so these tests skip:
+- the dataset tests, because the configured dataset root does not exist there and `THUD_DATASET_ROOT` is not
+  set;
+- the run-folder checks, because there are no run folders.
 
-| Capture | Role | Earlier use |
+## Data splits
+
+Recorded in `configs/data_splits.json` and copied into every report:
+
+| Capture | Split | Earlier use |
 |---|---|---|
-| Capture_1 | development | Stages 1–4; Stage 3 depth/FOV fit |
-| Capture_2 | adjustment: the only capture on which a parameter may be adjusted | Stage 3 held-out depth test only |
-| Capture_3, Capture_4 | final evaluation: one run with a frozen config | not used |
+| Office/dynamic/Capture_1 | development | Stages 1–4, Step 8; Stage 3 depth/FOV fit |
+| Office/dynamic/Capture_2 | adjustment: the only capture on which a parameter may be adjusted | Stage 3 held-out depth test; Step 8 v2 development (one full inference run) |
+| Office/dynamic/Capture_3, Capture_4 | final evaluation: one run with a frozen config | not used |
+| Gym/dynamic, all captures (1–6) | cross-scene final evaluation: untouched cross-scene test | Capture_1 only: Stage 3 held-out depth test (reference masks vs reference 3D boxes; no model, fusion or motion output) |
+
+The Gym/dynamic split was recorded on 2026-10-13, before any use of Capture_2 and before the motion config
+was frozen.
+
+**Guard.** `data_splits.guard()` runs in every script that reads a capture: `audit_dataset.py`,
+`check_camera_streams.py`, `validate_depth.py`, `run_segmentation.py`, `track_objects.py`, `fuse_objects.py`
+and `estimate_motion.py`.
+- It refuses a final-evaluation capture unless `--final-evaluation` is passed, and refuses that flag on any
+  other capture.
+- `estimate_motion.py --final-evaluation` also requires the frozen motion config; see Step 8 v2.
+- `validate_depth.py` no longer tests Gym/dynamic/Capture_1 by default. The recorded Stage 3 run did test it,
+  before the split was declared.
 
 ## Stage 4: tracked-object 3D fusion (reference-depth baseline)
 

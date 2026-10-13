@@ -71,9 +71,9 @@ def check_frame_order(frames: list[dict]) -> None:
             raise RuntimeError(f"Timestamps not strictly increasing at step {cur['step']}")
 
 
-def check_against_metadata(frames: list[dict], seg_config_path: str) -> int:
+def check_against_metadata(frames: list[dict], seg_config_path: str, capture_dir: str | None = None) -> int:
     """Re-read the dataset metadata and confirm each manifest frame's identifiers and files."""
-    cfg = td.load_config(rp.resolve(seg_config_path, rp.active_roots()))
+    cfg = td.load_config(rp.resolve(seg_config_path, rp.active_roots()), capture=capture_dir)
     records, _ = td.load_frame_records(cfg)
     by_key = {(r.sequence_id, r.sensor_id, r.step): r for r in records}
     for f in frames:
@@ -187,12 +187,15 @@ def run(args: argparse.Namespace) -> Path:
     seg_dir = args.segmentation_run.resolve()
     frames, seg_info = load_segmentation_run(seg_dir)
     seg_cfg = td.load_config(rp.resolve(seg_info["config_path"], rp.make_roots(output_root=seg_dir.parent)))
+    # the capture the segmentation run used (it may have been given with --capture), not the config default
+    seg_cfg = td.load_config(Path(seg_cfg["config_path"]), capture=str(rp.resolve(
+        seg_info["capture_dir"], rp.make_roots(seg_cfg["dataset_root"], seg_dir.parent))))
     rp.set_active_roots(rp.make_roots(seg_cfg["dataset_root"], seg_dir.parent))
     ds.guard(ds.capture_key(seg_cfg["capture_dir"], seg_cfg["dataset_root"]), args.final_evaluation)
     for f in frames:  # stored paths -> paths on this machine
         f["rgb_path"] = str(rp.resolve(f["rgb_path"], rp.active_roots()))
     check_frame_order(frames)
-    checked = check_against_metadata(frames, seg_info["config_path"])
+    checked = check_against_metadata(frames, seg_info["config_path"], seg_cfg["capture_dir"])
     print(f"Segmentation run: {seg_dir.name} ({len(frames)} frames, identifiers checked against metadata)")
     pred_by_key = {frame_key(f): f for f in frames}  # segmentation outputs looked up by frame identifiers
     if args.frames:

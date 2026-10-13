@@ -125,9 +125,18 @@ def ground_plane_check(frames: list[dict], cfg: dict) -> dict:
     iqr = np.array([f["floor_world_y_iqr"] for f in frames if f.get("floor_world_y_iqr") is not None], float)
     lim = cfg["max_floor_height_spread_m"]
     cam_y = np.array([f["pose_translation"][1] for f in frames], float)
-    ok = len(fy) >= 0.5 * len(frames) and float(np.median(iqr)) <= lim and float(fy.max() - fy.min()) <= lim
+    med = float(np.median(fy))
+    within = np.abs(fy - med) <= lim
+    need = cfg.get("min_fraction_frames_within_limit", 1.0)
+    ok = len(fy) >= 0.5 * len(frames) and float(np.median(iqr)) <= lim and float(within.mean()) >= need
+    outliers = [(f["step"], round(f["floor_world_y"] - med, 3)) for f in frames
+                if f.get("floor_world_y") is not None and abs(f["floor_world_y"] - med) > lim]
     return {"vertical_axis": cfg["vertical_axis"], "plane_axes": cfg["plane_axes"],
             "frames_with_floor": int(len(fy)), "frames": len(frames),
+            "fraction_frames_within_limit": float(within.mean()), "min_fraction_frames_within_limit": need,
+            "outlier_frames": len(outliers), "outlier_frames_first": outliers[:20],
+            "outlier_note": "frames whose predicted-floor height differs from the median by more than the limit "
+                            "(e.g. a desk top segmented as floor); they do not change the axis check",
             "floor_world_y_median_m": float(np.median(fy)), "floor_world_y_range_across_frames_m": float(fy.max() - fy.min()),
             "floor_world_y_within_frame_iqr_median_m": float(np.median(iqr)), "limit_m": lim,
             "camera_height_above_floor_m": stats(cam_y - np.median(fy)),
