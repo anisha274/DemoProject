@@ -22,6 +22,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw
 
+import run_paths as rp
 import thud_data as td
 from audit_dataset import audit_capture
 from check_environment import device_name, select_device, verify_device
@@ -186,7 +187,7 @@ def resolve_revision(model_id: str, revision: str) -> str:
 
 
 def write_json(path: Path, data) -> None:
-    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    path.write_text(rp.dumps(data, indent=2), encoding="utf-8")
 
 
 def run(args: argparse.Namespace) -> Path:
@@ -196,7 +197,8 @@ def run(args: argparse.Namespace) -> Path:
 
     cfg = td.load_config(args.config, args.dataset_root, args.capture)
     if args.output_root:
-        cfg["output_root"] = str(args.output_root)
+        cfg["output_root"] = str(Path(args.output_root).absolute())
+    rp.set_active_roots(rp.roots_from_config(cfg))
     class_names = cfg["project_classes"]
     if class_names[0] != "other" or len(class_names) > len(PROJECT_COLOURS):
         raise ValueError("project_classes must start with 'other' and have at most "
@@ -323,7 +325,7 @@ def run(args: argparse.Namespace) -> Path:
 
             timing = {"preprocess_ms": (t1 - t0) * 1000, "inference_ms": (t2 - t1) * 1000}
             timings.append(timing)
-            manifest.write(json.dumps({
+            manifest.write(rp.dumps({
                 "index": i, **{k: v for k, v in rec.to_dict().items()},
                 "rgb_mode": rgb_mode, "size_wh": [w, h], "outputs": outputs, "timing": timing,
                 "valid_reference_pixels": int(valid.sum()), "ignored_pixels": int((~valid).sum()),

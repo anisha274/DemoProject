@@ -25,6 +25,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
+import run_paths as rp
 import thud_data as td
 from check_environment import device_name, select_device, verify_device
 from run_segmentation import PROJECT_COLOURS, overlay
@@ -71,7 +72,7 @@ def check_frame_order(frames: list[dict]) -> None:
 
 def check_against_metadata(frames: list[dict], seg_config_path: str) -> int:
     """Re-read the dataset metadata and confirm each manifest frame's identifiers and files."""
-    cfg = td.load_config(Path(seg_config_path))
+    cfg = td.load_config(rp.resolve(seg_config_path, rp.active_roots()))
     records, _ = td.load_frame_records(cfg)
     by_key = {(r.sequence_id, r.sensor_id, r.step): r for r in records}
     for f in frames:
@@ -163,7 +164,7 @@ def open_video(path: Path, fps: float, size_wh: tuple[int, int]):
 # ---------------------------------------------------------------- main run
 
 def write_json(path: Path, data) -> None:
-    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    path.write_text(rp.dumps(data, indent=2), encoding="utf-8")
 
 
 def run(args: argparse.Namespace) -> Path:
@@ -184,6 +185,10 @@ def run(args: argparse.Namespace) -> Path:
 
     seg_dir = args.segmentation_run.resolve()
     frames, seg_info = load_segmentation_run(seg_dir)
+    seg_cfg = td.load_config(rp.resolve(seg_info["config_path"], rp.make_roots(output_root=seg_dir.parent)))
+    rp.set_active_roots(rp.make_roots(seg_cfg["dataset_root"], seg_dir.parent))
+    for f in frames:  # stored paths -> paths on this machine
+        f["rgb_path"] = str(rp.resolve(f["rgb_path"], rp.active_roots()))
     check_frame_order(frames)
     checked = check_against_metadata(frames, seg_info["config_path"])
     print(f"Segmentation run: {seg_dir.name} ({len(frames)} frames, identifiers checked against metadata)")
@@ -338,7 +343,7 @@ def run(args: argparse.Namespace) -> Path:
             counts["frames"] += 1
             counts["observations"] += len(observations)
             counts["empty_frames"] += not observations
-            frames_f.write(json.dumps({
+            frames_f.write(rp.dumps({
                 "index": i, "sequence_id": frame["sequence_id"], "sensor_id": frame["sensor_id"],
                 "capture_id": frame["capture_id"], "step": frame["step"], "timestamp": frame["timestamp"],
                 "image_width": w, "image_height": h, "rgb_path": frame["rgb_path"],

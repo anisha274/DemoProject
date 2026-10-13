@@ -47,6 +47,13 @@
     "rule": "World speed hysteresis: moving at >= enter, stationary at <= exit, otherwise the previous state. A moving object is approaching / moving_away when its OWN world velocity component toward / away from camera_proxy is at least radial_min_speed_mps, otherwise moving_lateral. A new label is emitted only after it has persisted for persistence_s."
   },
 
+  "motion_trust": {
+    "dynamic_classes": ["person"],
+    "rule": "motion_trusted = true only for an estimated motion of a detector class in dynamic_classes. Other classes keep their motion values with motion_trusted = false.",
+    "use": "Step 9 decision rules use only trusted motion. Static obstacles enter decisions through the passage-width map, not through motion labels.",
+    "why": "Design decision, not tuning. Furniture motion error is systematic drift: mask coverage changes and a viewpoint-dependent visible-surface point (46% false motion even on the reference visible point). A longer window averages noise but cannot remove drift that follows the camera's path."
+  },
+
   "route": {
     "horizon_s": 5.0,
     "time_step_s": 0.02,

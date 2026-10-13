@@ -43,6 +43,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
 import motion as mo  # noqa: E402
+import run_paths as rp  # noqa: E402
 import thud_data as td  # noqa: E402
 import thud_depth as tdd  # noqa: E402
 from fuse_objects import depth_path, instance_masks, resolve, sensor_pose, stats, write_json  # noqa: E402
@@ -58,10 +59,10 @@ FIELDS = [
     "pixel_source", "selection_method", "selected_pixel_count", "valid_depth_pixel_count", "depth_spread_m",
     "position_valid", "invalid_reason", "reliable", "unreliable_reason",
     "raw_world_x", "raw_world_y", "raw_world_z",
-    "segment", "resets_so_far", "motion_status",
+    "segment", "resets_so_far", "reset_reason", "motion_status",
     "filt_world_x", "filt_world_y", "filt_world_z", "vel_x_mps", "vel_z_mps", "vel_se_x_mps", "vel_se_z_mps",
     "speed_mps", "speed_se_mps", "heading_deg", "window_n", "window_span_s", "velocity_lag_s",
-    "moving_state", "motion_label",
+    "moving_state", "motion_label", "motion_trusted",
     "camera_proxy_x", "camera_proxy_z", "range_m", "range_rate_mps", "range_rate_object_mps",
     "range_rate_camera_mps", "range_label",
     "route_label", "route_status", "dist_to_route_centreline_m", "time_to_route_s", "time_to_route_p10_s",
@@ -139,11 +140,15 @@ def estimate_series(t, xz, steps, cls, cam: Camera, cfg: dict, route: dict | Non
     out = []
     state_prev, lab_track, rng_track, cur_seg = None, None, None, -1
     for i in range(len(t)):
+        reset_reason = ""
         if seg[i] != cur_seg:
+            if i > 0:
+                reset_reason = reasons[seg[i] - 1]  # segment k starts with reset k-1
             cur_seg, state_prev = seg[i], None
             lab_track, rng_track = mo.Persistent(lab["persistence_s"]), mo.Persistent(lab["persistence_s"])
         c, vc = cam.at(int(steps[i]))
-        rec = {"timestamp": float(t[i]), "segment": int(seg[i]), "resets_so_far": int(seg[i]), "camera_proxy_x": c[0], "camera_proxy_z": c[1],
+        rec = {"timestamp": float(t[i]), "segment": int(seg[i]), "resets_so_far": int(seg[i]),
+               "reset_reason": reset_reason, "camera_proxy_x": c[0], "camera_proxy_z": c[1],
                "range_m": float(np.hypot(*(xz[i] - c)))}
         e = mo.window_estimate(t, xz, i, seg, mcfg)
         if e is None:
@@ -209,6 +214,7 @@ def estimate_tracks(states: list[dict], cam: Camera, cfg: dict, route: dict | No
     for s in states:
         by_track[s["track_id"]].append(s)
     rows, resets = [], defaultdict(Counter)
+    dynamic = set(cfg["motion_trust"]["dynamic_classes"])
     for tid, obs in by_track.items():
         obs.sort(key=lambda s: s["timestamp"])
         for s in obs:
@@ -245,6 +251,7 @@ def estimate_tracks(states: list[dict], cam: Camera, cfg: dict, route: dict | No
                     c, _ = cam.at(s["step"])
                     row.update({"camera_proxy_x": c[0], "camera_proxy_z": c[1],
                                 "range_m": float(np.hypot(s["world_x"] - c[0], s["world_z"] - c[1]))})
+            row["motion_trusted"] = row["motion_status"] == "estimated" and row["class_name"] in dynamic
             rows.append(row)
     rows.sort(key=lambda r: (r["step"], int(r["track_id"])))
     return rows, {k: dict(v) for k, v in resets.items()}
@@ -618,6 +625,7 @@ def run(args: argparse.Namespace) -> Path:
     cfg_path = resolve(args.config)
     cfg = read_json(cfg_path)
     office = td.load_config(resolve(cfg["office_config"]))
+    rp.set_active_roots(rp.roots_from_config(office))
     splits = read_json(resolve(cfg["splits_config"]))
     robot = read_json(resolve(cfg["robot_config"]))
     depth_cfg = tdd.load_depth_config(resolve(cfg["depth_config"]))
@@ -719,6 +727,7 @@ def run(args: argparse.Namespace) -> Path:
                                "decreases because the camera moved is labelled stationary + range_decreasing, never "
                                "approaching.",
                 "camera_proxy": "reference camera position; the camera-to-robot offset is not defined yet.",
+                "motion_trusted": cfg["motion_trust"]["rule"],
                 "route": "proxy_route: corridor around the recorded camera path, width from robot.json (robot only, "
                          "load not measured). time_to_route_s = first time the constant-velocity extrapolation enters "
                          "the corridor. It is NOT a time to collision." if route else "no corridor: not_evaluated",
@@ -741,6 +750,10 @@ def run(args: argparse.Namespace) -> Path:
                 "people_pixel_source": dict(Counter(r["pixel_source"] for r in people)),
                 "people_motion_labels": dict(Counter(r["motion_label"] for r in people)),
                 "people_route_status": dict(Counter(r["route_status"] for r in people)),
+                "motion_trusted_rows": sum(r["motion_trusted"] for r in rows),
+                "motion_trusted_by_class": dict(Counter(r["class_name"] for r in rows if r["motion_trusted"])),
+                "estimated_but_untrusted_by_class": dict(Counter(r["class_name"] for r in rows
+                                                                 if r["motion_status"] == "estimated" and not r["motion_trusted"])),
             },
             "evaluation": ev,
         }

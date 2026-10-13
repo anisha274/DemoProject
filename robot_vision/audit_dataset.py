@@ -13,6 +13,7 @@ from pathlib import Path
 
 import numpy as np
 
+import run_paths as rp
 import thud_data as td
 
 
@@ -142,11 +143,12 @@ def main() -> None:
     args = parser.parse_args()
 
     cfg = td.load_config(args.config, args.dataset_root, args.capture)
+    rp.set_active_roots(rp.roots_from_config(cfg))
     report, _ = audit_capture(cfg, args.start, args.frames, decode=True)
     out_dir = args.output_dir or Path(cfg["output_root"]) / f"audit_{datetime.now():%Y%m%d_%H%M%S}"
     out_dir.mkdir(parents=True, exist_ok=False)
     path = out_dir / "audit_report.json"
-    path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    path.write_text(rp.dumps(report, indent=2), encoding="utf-8")
     print_summary(report)
     print(f"Report written : {path}")
     raise SystemExit(0 if report["ok"] else 1)

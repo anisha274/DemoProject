@@ -26,6 +26,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
+import run_paths as rp
 import thud_data as td
 import thud_depth as tdd
 from check_camera_streams import box_iou, quat_rotate
@@ -284,6 +285,7 @@ def main() -> None:
     args = parser.parse_args()
 
     cfg = td.load_config(args.config, args.dataset_root)
+    rp.set_active_roots(rp.roots_from_config(cfg))
     root = Path(cfg["dataset_root"])
     rng = np.random.default_rng(0)
     out_dir = Path(cfg["output_root"]) / f"depth_check_{datetime.now():%Y%m%d_%H%M%S}"
@@ -321,7 +323,7 @@ def main() -> None:
         report["captures"][cap] = {"role": "test", **evaluate_capture(data, models, args.margin)}
 
     path = out_dir / "depth_validation_report.json"
-    path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    path.write_text(rp.dumps(report, indent=2), encoding="utf-8")
     print()
     print(f"{'capture':<44}{'role':<6}{'objects':>8}  " + "  ".join(f"{m[:22]:>22}" for m in models))
     for cap, r in report["captures"].items():

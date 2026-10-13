@@ -40,6 +40,7 @@ from scipy.optimize import linear_sum_assignment
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
+import run_paths as rp  # noqa: E402
 import thud_data as td  # noqa: E402
 import thud_depth as tdd  # noqa: E402
 from check_camera_streams import box_iou, gradient_magnitude  # noqa: E402
@@ -64,7 +65,7 @@ def resolve(p: str | Path) -> Path:
 
 
 def write_json(path: Path, data) -> None:
-    path.write_text(json.dumps(data, indent=2, default=lambda o: o.tolist() if hasattr(o, "tolist") else str(o)),
+    path.write_text(rp.dumps(data, indent=2, default=lambda o: o.tolist() if hasattr(o, "tolist") else str(o)),
                     encoding="utf-8")
 
 
@@ -490,6 +491,7 @@ def draw_topdown(states: list[dict], frame_info: list[dict], eval_rows: list[dic
 def run(args: argparse.Namespace) -> Path:
     cfg = json.loads(resolve(args.config).read_text(encoding="utf-8"))
     office = td.load_config(resolve(cfg["office_config"]))
+    rp.set_active_roots(rp.roots_from_config(office))
     depth_cfg = tdd.load_depth_config(resolve(cfg["depth_config"]))
     track_dir = resolve(cfg["tracking_run"])
     if not (track_dir / "COMPLETE").exists():
@@ -497,6 +499,9 @@ def run(args: argparse.Namespace) -> Path:
     frames = [json.loads(l) for l in (track_dir / "frames.jsonl").read_text(encoding="utf-8").splitlines() if l]
     with (track_dir / "tracks.csv").open(encoding="utf-8") as f:
         tracks = list(csv.DictReader(f))
+    for f in frames:  # stored paths -> paths on this machine
+        for key in ("rgb_path", "segmentation_mask"):
+            f[key] = str(rp.resolve(f[key], rp.active_roots()))
     rows_by_step = defaultdict(list)
     for r in tracks:
         rows_by_step[int(r["step"])].append(r)
@@ -546,7 +551,7 @@ def run(args: argparse.Namespace) -> Path:
             wr.writeheader()
             for s in states:
                 wr.writerow({k_: (round(v, 5) if isinstance(v, float) else v) for k_, v in s.items()})
-        (out / "frames.jsonl").write_text("".join(json.dumps(fi) + "\n" for fi in frame_info), encoding="utf-8")
+        (out / "frames.jsonl").write_text("".join(rp.dumps(fi) + "\n" for fi in frame_info), encoding="utf-8")
         report, eval_rows = evaluate(states, ctx)
         report["coverage"] = {
             "observations": len(states), "valid_positions": sum(s["position_valid"] for s in states),

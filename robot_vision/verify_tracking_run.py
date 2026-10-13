@@ -10,12 +10,17 @@ import csv, json, sys
 from pathlib import Path
 import numpy as np, cv2
 from PIL import Image
+import run_paths as rp
 run = Path(sys.argv[1])
 summ = json.loads((run / "tracking_summary.json").read_text(encoding="utf-8"))
 n_expected = summ["frames"]["count"]
-seg = Path(summ["segmentation_run"])
+# stored paths are relative to the output root, which holds this run
+roots = rp.make_roots(output_root=run.resolve().parent)
+seg = rp.resolve(summ["segmentation_run"], roots)
 man = [json.loads(l) for l in (seg / "manifest.jsonl").read_text(encoding="utf-8").splitlines()][:n_expected]
 frames = [json.loads(l) for l in (run / "frames.jsonl").read_text(encoding="utf-8").splitlines()]
+for f in frames:
+    f["segmentation_mask"] = rp.resolve(f["segmentation_mask"], roots)
 key = lambda d: (d["sequence_id"], d["sensor_id"], int(d["step"]))
 assert json.loads((run / "run_status.json").read_text())["status"] == "complete" and (run / "COMPLETE").exists()
 assert len(frames) == n_expected, len(frames)

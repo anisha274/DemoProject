@@ -22,6 +22,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw
 
+import run_paths as rp
 import thud_data as td
 
 MAX_SHIFT = 6  # pixels searched in each direction for the RGB/label alignment
@@ -181,6 +182,7 @@ def main() -> None:
     args = parser.parse_args()
 
     cfg = td.load_config(args.config, args.dataset_root, args.capture)
+    rp.set_active_roots(rp.roots_from_config(cfg))
     main_sensor = cfg["rgb_sensor_id"]
     capture_dir = Path(cfg["capture_dir"])
     records = load_all_records(cfg)
@@ -245,7 +247,7 @@ def main() -> None:
         ],
     }
     path = out_dir / "camera_stream_report.json"
-    path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    path.write_text(rp.dumps(report, indent=2), encoding="utf-8")
 
     print(f"Metadata differences between {main_sensor} and {args.other_sensor}: "
           + ", ".join(f"{k}={len(v)}" for k, v in md["steps_with_differences"].items()))

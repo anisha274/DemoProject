@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -22,6 +23,7 @@ import numpy as np
 
 import thud_data as td
 from check_camera_streams import box_iou
+import run_paths as rp
 from fuse_objects import ref_boxes_2d, resolve, stats, write_json
 from validate_depth import load_records
 
@@ -66,7 +68,22 @@ def calibration_section(run_info: dict, depth_cfg: dict, depth_val: dict | None)
                        "median IoU 0 with the reference 2D boxes; the 60 deg model gives 92-100% and IoU 0.72-0.82."),
         },
     }
+    vfov = 2 * math.degrees(math.atan(k["cy"] / k["fy"]))
+    sec["vertical_fov_check"] = {
+        "fy": k["fy"], "cy": k["cy"], "vertical_fov_deg": round(vfov, 6),
+        "note": "2 * atan(cy / fy) = 60.0 deg, Unity's default camera field of view (vertical).",
+    }
     if depth_val:
+        fitted = depth_val["report"]["fitted_parameters"]
+        far = fitted["far_m"]
+        sec["far_plane_check"] = {
+            "fitted_far_m": far, "nearest_round_m": round(far), "relative_difference": abs(far - round(far)) / round(far),
+            "fitted_vertical_fov_deg": fitted["vertical_fov_deg"],
+            "note": (f"The fitted far plane {far:.3f} m is within {abs(far - round(far)) / round(far):.2%} of a round "
+                     f"{round(far)} m, and the round value fits the held-out captures at least as well, so a 10 m "
+                     "depth range is the likely capture setting. It is not Unity's default camera far clip plane "
+                     "(1000 m) and is not stated in the capture metadata, so it remains an inference from the fit."),
+        }
         sec["depth_validation_run"] = depth_val["path"]
         sec["mean_inside_fraction_by_model_and_capture"] = {
             c: {m: round(s["mean_inside_fraction"], 3) for m, s in v["models"].items()}
@@ -215,6 +232,9 @@ def write_markdown(rep: dict, path: Path) -> None:
          "- World: " + "; ".join(c["world_transform"]) + ".",
          f"- Depth: {c['depth_conversion']['rule']}. {c['depth_conversion']['quantity']}.",
          f"- Evidence: {c['depth_conversion']['evidence']}",
+         f"- Field of view check: fy = {c['vertical_fov_check']['fy']:.2f}, cy = {c['vertical_fov_check']['cy']} -> "
+         f"vertical FOV {c['vertical_fov_check']['vertical_fov_deg']:.1f} deg. {c['vertical_fov_check']['note']}",
+         *([f"- Far plane: {c['far_plane_check']['note']}"] if "far_plane_check" in c else []),
          f"- Recorded camera_intrinsic rejected ({c['recorded_camera_intrinsic_rejected']['values']}): "
          f"{c['recorded_camera_intrinsic_rejected']['reason']}", "",
          "## Parameters fitted on reference boxes", ""]
@@ -250,7 +270,7 @@ def write_markdown(rep: dict, path: Path) -> None:
         s = v["ground_plane_xz"]
         L.append(f"| {g} | {s['n']} | {s['median']:.4f} | {s['p90']:.4f} | {s['max']:.3f} |")
     L += ["", t["note"]]
-    path.write_text("\n".join(L) + "\n", encoding="utf-8")
+    path.write_text(rp.portable_text("\n".join(L) + "\n", rp.active_roots())[0], encoding="utf-8")
 
 
 def main() -> None:
@@ -265,6 +285,7 @@ def main() -> None:
     run_info = json.loads((run / "run_info.json").read_text(encoding="utf-8"))
     cfg = run_info["config"]
     office = td.load_config(resolve(cfg["office_config"]))
+    rp.set_active_roots(rp.roots_from_config(office))
     depth_cfg = run_info["depth_config"]
     depth_val = None
     if args.depth_validation_run:
