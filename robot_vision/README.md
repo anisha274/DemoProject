@@ -31,6 +31,12 @@ The teammate's gesture code lives in a separate repository
 | `tests/test_fuse_objects.py` | Unit tests for the pose convention, pixel selection and point-to-box distance. |
 | `report_step4.py` | Step 4 report supplement: calibration used, fitted parameters, all-class table, unmatched-couch classification, timing and step sizes. Reads a fusion run; never modifies it. |
 | `configs/data_splits.json` | Office/dynamic split: Capture_1 development, Capture_2 adjustment, Capture_3/4 final evaluation only. |
+| `motion.py` | Step 8 building blocks: observation quality, track resets, trailing-window velocity, labels with hysteresis, route geometry. |
+| `estimate_motion.py` | Step 8: world and relative motion per tracked observation from a fusion run, proxy-route time-to-route, evaluation, plots. |
+| `make_proxy_route.py` | Writes an explicit corridor config from the recorded camera path, with width from `robot.json`. |
+| `configs/motion_office.json` | Step 8 settings (fixed before evaluation), input runs and config paths. |
+| `configs/proxy_route_office_capture1.json` | The THUD `proxy_route` corridor: 16-point centreline, 3.70 m long, 0.80 m wide. |
+| `tests/test_motion.py` | Unit tests for `motion.py`. |
 
 ## Setup
 
@@ -421,12 +427,150 @@ It writes `outputs/step4_supplement_<date>_<time>/`:
   classification, timing.
 - `couch_unmatched.csv`.
 
+## Step 8: temporal motion (reference-depth and reference-camera-pose baseline)
+
+Windows PowerShell:
+
+```powershell
+cd E:\RobotVisionWorkspace\robot_vision
+.\.venv\Scripts\python.exe make_proxy_route.py --fusion-run outputs\fuse_300f_20261011_042733 --out configs\proxy_route_office_capture1.json
+.\.venv\Scripts\python.exe estimate_motion.py
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+```
+
+macOS Terminal:
+
+```bash
+cd /path/to/RobotVisionWorkspace/robot_vision
+export THUD_DATASET_ROOT=/Volumes/Data/RGB-D
+.venv/bin/python make_proxy_route.py --fusion-run outputs/fuse_300f_20261011_042733 --out configs/proxy_route_office_capture1.json
+.venv/bin/python estimate_motion.py
+.venv/bin/python -m unittest discover -s tests -v
+```
+
+The fusion run must exist locally. `make_proxy_route.py` needs re-running only if `robot.json` changes;
+`estimate_motion.py` refuses a corridor whose width disagrees with `robot.json`. Add `--no-route` to set every
+route field to `not_evaluated`. On a final-evaluation capture the script refuses to run without
+`--final-evaluation`.
+
+**Baseline.** Positions are Step 4 visible-surface points, computed from THUD reference depth and the recorded
+camera poses. Treat every result as a controlled experimental baseline.
+- No inference is rerun; `object_states.csv` is reused.
+- World positions already include camera-motion compensation (`p_world = R p_cam + t`), so camera movement is
+  not subtracted again.
+
+**Ground plane, checked from data.** Predicted-floor points have world y = −0.957 m. The within-frame IQR is
+0.03 mm and the range across 300 frames is 0.02 mm, both well under the 2 cm limit. So y is vertical and the
+ground plane is world x–z. The camera stays 1.219 m above the floor.
+
+**Observation quality** (`configs/motion_office.json` → `quality`; no reference data):
+- `pixel_source` is `class_mask`, `fallback` or `none`.
+- An observation is `reliable` when its position is valid and the depth IQR of its selected pixels is ≤ 0.5 m
+  (class mask) or ≤ 0.25 m (fallback).
+- A larger spread means two surfaces, such as an occluder, so the observation is flagged unreliable. The
+  nearest depth cluster is never picked instead.
+
+**Motion.**
+- Velocity is the least-squares slope of x(t) and z(t) over a **0.5 s trailing window** of reliable observations,
+  using real timestamps. It needs at least 10 observations spanning 0.3 s; otherwise the status is
+  `insufficient_history`.
+- The line's value at the current time is the filtered position. Raw and filtered positions are both saved.
+- **Delay:** for a changing velocity the estimate describes the window's mean time, about 0.25 s ago (measured
+  median 0.249 s). Label persistence adds up to 0.2 s.
+- **Resets** start a new segment when one of these happens: a gap over 0.2 s; a jump over 0.5 m + 3 m/s × dt;
+  a detector class change.
+- Uncertainty is the line-fit standard error. It assumes independent residuals, so it understates slow
+  pixel-selection drift.
+
+**Two separate measurements.**
+- *World motion:* ground-plane speed and heading (`atan2(vx, vz)`). `motion_label` is one of:
+  - `stationary` / moving, with hysteresis: moving at ≥ 0.35 m/s, stationary at ≤ 0.20 m/s.
+  - For moving objects: `approaching` / `moving_away` when the **object's own** velocity component toward or away
+    from `camera_proxy` is at least 0.2 m/s, otherwise `moving_lateral`.
+  - A label must persist 0.2 s before it is emitted; otherwise `unknown`.
+  - `moving_lateral` was added because a sideways-walking person is neither stationary nor approaching.
+- *Relative motion:* `range_rate_mps` is d/dt of the ground-plane distance to `camera_proxy`. It is split into
+  `range_rate_object_mps` and `range_rate_camera_mps`. `range_label` is `range_decreasing` / `range_increasing` /
+  `range_steady`, with a ±0.2 m/s dead band.
+- A stationary person whose distance shrinks because the camera moved is `stationary` + `range_decreasing`,
+  never `approaching`.
+- `camera_proxy` is the camera position. The camera-to-robot offset is not defined yet.
+
+**Route.**
+- Crossing and time-to-route are computed only when a corridor config is given; otherwise `not_evaluated`.
+- For THUD the corridor is `proxy_route`: the recorded camera path, 0.80 m wide.
+  - That width is the robot's 0.60 m + 2 × 0.10 m; the load is not measured yet, so it is a lower bound.
+  - It is a test fixture built from reference poses, not a planned route.
+- `time_to_route_s` is the first time a **constant-velocity** extrapolation of the filtered position enters the
+  corridor, within a 5 s horizon.
+  - p10/p90 and `p_enter_route_within_horizon` come from 200 Monte Carlo velocity samples.
+  - **It is not a time to collision:** the corridor is static and the robot's own motion is not modelled.
+
+**Evaluation** (reference used only here):
+- Each reference instance has a visible-surface-point trajectory: the median of its instance-mask pixels,
+  from reference depth and poses. Instance IDs are stable over time.
+- Its velocity, from the same estimator, is a **proxy**, not the person-centre velocity.
+- Tracks link to instances through the Step 4 per-frame association.
+
+Run `motion_300f_20261013_210331` (development capture; code commit d247bba):
+
+| People (607 observations) | Result |
+|---|---|
+| Estimated / insufficient history / unreliable | 437 / 97 / 73 |
+| Pixel source | class mask 549, fallback 49, none 9 |
+| Reference-proxy speed (median) | 0.94 m/s (people are walking) |
+| Speed error vs proxy: median abs / p90 abs / max | 0.013 / 0.096 / 1.28 m/s (435 pairs) |
+| Heading error (both ≥ 0.3 m/s): median / p90 / max | 0.75° / 5.7° / 132° |
+| `motion_label` agreement with proxy | 99.0% (386 pairs; 4 `moving_away` → `moving_lateral`) |
+| `range_label` agreement | 97.9% |
+| Resets (person tracks) | 7, all jumps; 71 over all classes |
+| Identity | 4 people instances; one is split across 3 tracks, one across 2; 3 of 36 tracks switch reference ID (11 switches) |
+| Time to route (people), estimated − realized entry | median 0.014 s, max 0.042 s (n = 23, realized entry median 0.22 s ahead) |
+| Time-to-route outcomes | 23 entered; 38 `crossing_route` and 227 `not_crossing` censored (sequence ended within 5 s); no false alarm or miss observed |
+
+Static-furniture control: the same estimator on objects whose true velocity is 0.
+
+| Group | Estimates (tracks) | Speed median / p90 | False motion (labelled) | Reference proxy, same instances |
+|---|---|---|---|---|
+| Chair / Desk / Sofa, static verified in Step 4 | 123 (5) | 0.62 / 1.32 m/s | **100% of 67** | 0.27 m/s median, 46% false motion |
+| Computer / Plants / Book, static assumed, not verified | 162 (4) | 0.04 / 0.70 m/s | 12% of 124 | 0.02 m/s, 12% |
+
+**Reading the static control.** The estimator does **not** separate stationary furniture from moving objects:
+- 50 of the 67 labelled static estimates come from chair track 212. Its predicted chair mask grows from about
+  90 to about 25,000 pixels as more of the chair is segmented. The visible-surface median slides about 0.3 m,
+  which reads as about 0.6 m/s "approaching". The reference point for that chair moves 0.03 m/s.
+- Even the reference visible point moves (46% false motion), because it slides over large objects as the camera
+  walks past.
+- People give good results because the person mask is compact and stable: Step 4 visible-point error was
+  0.02 m.
+- Furniture motion labels should not be trusted. A rule against mask-coverage changes would be the next
+  candidate, but it may only be tuned on Capture_2. **No setting was changed after these results.**
+
+Outputs in `outputs/motion_300f_<date>_<time>/`:
+
+| File | Content |
+|---|---|
+| `motion_states.csv` | One row per tracked observation: quality fields, raw and filtered world position, velocity ± SE, speed, heading, window size/span/lag, resets, labels, camera_proxy range and rates, route status, time-to-route p10/p90 |
+| `motion_evaluation.json` | Baseline label, split, git commit, ground-plane check, definitions, coverage, evaluation |
+| `reference_motion_eval_only.csv` | The reference-proxy estimates (evaluation only) |
+| `birdseye_trajectories.png` | Camera path, proxy route corridor, person tracks (raw and filtered), reference proxies, static tracks |
+| `speed_vs_time_people.png`, `speed_vs_time_static_control.png` | Speed vs timestamp against the proxy and the thresholds |
+| `overlays/step_*.png` | Labels, speed ± SE, range trend, route status and projected velocity arrow (steps 45, 150, 299) |
+| `run_info.json`, `config_used/` | Exact configs, git commit hash and dirty flag, versions, command |
+
 ## Known limitations
 
 - Depth decoding is validated only for the THUD **synthetic** captures above. Real-scene depth and any
-  monocular or relative depth model are not validated. No distance, speed, passage width or clearance is
-  computed yet.
-- Tracking works in image pixels only. No metric distance, speed, 3D clearance or movement decision is
-  computed.
+  monocular or relative depth model are not validated.
+- Steps 4 and 8 are a **reference-depth and reference-camera-pose baseline**. They do not measure an RGB-only
+  depth model or an estimated camera pose.
+- Step 8 is evaluated on one 5 s development excerpt with 4 people. Most time-to-route cases are censored by
+  the end of the sequence.
+- The reference is a visible-surface proxy, not person-centre ground truth. Capture_3 and Capture_4 have not
+  been used.
+- No passage width, clearance, occupancy map or movement decision is computed yet. `camera_proxy` is not the
+  robot position.
+- Earlier runs store absolute Windows paths in `frames.jsonl`. To rerun Stages 1–4 on macOS, regenerate those
+  runs there. Step 8 reads RGB file names from the dataset metadata, not from those paths.
 - Semantic labels are used only as evaluation references, never as model input.
 - Real-scene (`Real_Scenes/store`) captures use a different layout and are not supported yet.
