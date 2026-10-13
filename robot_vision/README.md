@@ -508,7 +508,7 @@ Windows PowerShell:
 ```powershell
 cd E:\RobotVisionWorkspace\robot_vision
 .\.venv\Scripts\python.exe make_proxy_route.py --fusion-run outputs\fuse_300f_20261011_042733 --out configs\proxy_route_office_capture1.json
-.\.venv\Scripts\python.exe estimate_motion.py
+.\.venv\Scripts\python.exe estimate_motion.py --fusion-run outputs\fuse_300f_20261011_042733 --route-config configs\proxy_route_office_capture1.json
 .\.venv\Scripts\python.exe report_motion.py --motion-run outputs\motion_300f_<date>_<time>
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
@@ -519,15 +519,16 @@ macOS Terminal:
 cd /path/to/RobotVisionWorkspace/robot_vision
 export THUD_DATASET_ROOT=/Volumes/Data/RGB-D
 .venv/bin/python make_proxy_route.py --fusion-run outputs/fuse_300f_20261011_042733 --out configs/proxy_route_office_capture1.json
-.venv/bin/python estimate_motion.py
+.venv/bin/python estimate_motion.py --fusion-run outputs/fuse_300f_20261011_042733 --route-config configs/proxy_route_office_capture1.json
 .venv/bin/python report_motion.py --motion-run outputs/motion_300f_<date>_<time>
 .venv/bin/python -m unittest discover -s tests -v
 ```
 
 The fusion run must exist locally. `make_proxy_route.py` needs re-running only if `robot.json` changes;
-`estimate_motion.py` refuses a corridor whose width disagrees with `robot.json`. Add `--no-route` to set every
-route field to `not_evaluated`. On a final-evaluation capture the script refuses to run without
-`--final-evaluation`.
+`estimate_motion.py` refuses a corridor whose width disagrees with `robot.json`. Without `--route-config` every
+route field is `not_evaluated`. The motion config holds settings only; the fusion run and corridor are
+command-line inputs. On a final-evaluation capture the script refuses to run without `--final-evaluation`, and that
+flag also requires the frozen config (see Step 8 v2).
 
 **Baseline.** Positions are Step 4 visible-surface points, computed from THUD reference depth and the recorded
 camera poses. Treat every result as a controlled experimental baseline.
@@ -696,14 +697,147 @@ Outputs in `outputs/motion_300f_<date>_<time>/`:
 | `overlays/step_*.png` | Labels, speed ± SE, range trend, route status and projected velocity arrow (steps 45, 150, 299) |
 | `run_info.json`, `config_used/` | Exact configs, git commit hash and dirty flag, versions, command |
 
+## Step 8 v2: Capture_2 adjustment and frozen motion config
+
+All results here remain a **reference-depth and reference-camera-pose baseline**.
+
+### Rules declared before any Capture_2 use (`configs/motion_office.json`)
+- **Heading error** is reported only where the *reference* speed is ≥ `heading_min_speed_mps` (0.3 m/s). Excluded
+  pairs are counted.
+- **Distance bins** are 0–3 m, 3–6 m and 6+ m, measured as the ground-plane distance from `camera_proxy` to the
+  visible-surface point.
+  - The distance uses any valid-depth pixels, so invalid positions are binned too.
+  - `unknown` means the observation had no valid depth at all.
+- **Time-to-route** is binned by estimated look-ahead: 0–1 s, 1–3 s and 3–5 s. Censored cases are reported
+  separately.
+- **Class vote** (`motion.class_vote_window_s` = 1.0 s): `motion_class` is the majority detector class of the track
+  over the trailing second. It replaces reset-on-class-change, so resets come only from observation gaps and
+  position jumps. It is used for `motion_trusted` and per-class reporting. Step 4 pixel selection is unchanged.
+- **Mask-coverage-change rule** (`quality.coverage_change`): an observation is flagged `mask_coverage_change` if
+  its selected-pixel count is more than 2× larger or smaller than that of any observation of the same track in
+  the previous 0.25 s. Flagged observations do not update motion.
+  - Because 0.25 s exceeds the 0.2 s gap limit, a step change also restarts the segment.
+  - Gradual coverage changes slower than this are not caught.
+- **Uncertainty-scaled moving threshold** (`labels.uncertainty_k`): an object is moving if speed − k·SE ≥ 0.35, and
+  stationary if speed + k·SE ≤ 0.20; otherwise it keeps its previous state.
+  - Decision rule, declared beforehand: adopt k = 2 only if, on Capture_2, it lowers the static-verified
+    false-motion rate and costs at most 2 points of person label agreement.
+
+### Capture_2: one full inference run (same models and settings as Capture_1)
+
+| Run | Folder |
+|---|---|
+| SegFormer-b0, all 1388 frames | `outputs/seg_Office_dynamic_Capture_2_1388f_20261013_220700` (mean IoU 0.58) |
+| YOLO11n + ByteTrack, `--device auto` → CUDA | `outputs/track_1388f_20261013_221603` (integrity checks passed) |
+| Fusion (reference depth) | `outputs/fuse_1388f_20261013_222006` (geometry checks passed; 8617 of 8890 positions valid) |
+| Proxy route | `configs/proxy_route_office_capture2.json` (14.42 m, 0.80 m wide) |
+
+- **Capture size:** 1388 frames, 23.04 s, 60.24 Hz. 3 reference people appear in the 2D boxes.
+- **Earlier tracking attempt:** an earlier `track_objects.py` attempt stopped before loading the detector. It
+  re-read the Capture_1 metadata because the segmentation run had used `--capture`. That is fixed, and inference
+  ran once.
+- **Ground-plane check:**
+  - The v1 rule needed every frame within 2 cm, and it failed on Capture_2. In 65 of 1237 frames, SegFormer
+    labels desk tops as floor (about 0.70 m above it).
+  - The axis check now needs ≥ 90% of frames within 2 cm of the median and lists the outliers. Capture_2 gives
+    94.7%, Capture_1 100%.
+
+### Results (frozen config, sha256 `15821ff9…1625`)
+
+Capture_2 (adjustment). "Before" is the v1-equivalent settings; "after" is the frozen v2:
+
+| Metric | v1-equivalent | Frozen v2 |
+|---|---|---|
+| People pairs (track + reference estimate) | 366 | 300 |
+| People abs speed error median / p90 | 0.006 / 0.083 m/s | 0.005 / 0.025 m/s |
+| People heading error median / p90 (excluded: ref speed < 0.3) | 1.3° / 3.0° (118) | 1.2° / 2.8° (108) |
+| People motion-label agreement | 100% | 100% |
+| Static verified (Chair/Desk/Sofa): estimates / false motion | 949 / 8.9% | 363 / 0% |
+| Static unverified: false motion | 0% | 0% |
+| Resets | 261 | 57 (54 gaps, 3 jumps) |
+| Class changes between consecutive observations (detector → voted) | 303 | 36 |
+| Observations flagged by the coverage rule | — | 3244 of 8890 (1859 made unreliable) |
+
+Capture_2 per person, frozen v2. n_people = 3; frames are highly correlated:
+
+| Person | Tracks | Pairs | ~Independent 0.5 s windows | Ref speed | Abs speed error median / p90 | Heading error median / p90 |
+|---|---|---|---|---|---|---|
+| 41 | 4, 382 | 141 | 4.6 | 0.24 m/s | 0.004 / 0.011 m/s | 0.9° / 1.8° |
+| 45 | 2, 380, 455 | 134 | 4.4 | 0.73 m/s | 0.006 / 0.018 m/s | 1.3° / 2.6° |
+| 78 | 773 | 25 | 0.9 | 1.03 m/s | 0.028 / 0.043 m/s | 1.1° / 3.8° |
+
+Capture_2 by distance bin, frozen v2:
+
+| Bin | Observations | Invalid positions | Estimated | People obs / invalid / pairs | People abs speed error median |
+|---|---|---|---|---|---|
+| 0–3 m | 5267 | 15 | 1432 | 352 / 0 / 275 | 0.004 m/s |
+| 3–6 m | 3285 | 204 | 482 | 96 / 2 / 25 | 0.028 m/s |
+| 6+ m | 337 | 53 | 0 | 32 / 14 / 0 | — |
+| unknown (no valid depth) | 1 | 1 | 0 | 0 | — |
+
+Nothing beyond 6 m reaches a motion estimate. Those positions are invalid, or fail the quality rules, mostly
+through large depth spread.
+
+**Time-to-route on Capture_2: inconclusive: 41 entries, ~0.48 s horizon, 23 s sequence.**
+- 0–1 s look-ahead: 41 entered. Estimated − realized is a median −0.38 s, so entry is called early. 20 are
+  censored.
+- 1–3 s: 52, all censored. 3–5 s: none.
+- 12 `not_crossing` cases are censored.
+- Censoring here mostly means the person's reference visibility ended before the 5 s horizon.
+
+**k decision.** On Capture_2, k = 2 gives the same static-verified false-motion rate as k = 0 (0%), and the same
+person label agreement (100%). The declared rule therefore keeps **k = 0**. The k = 2 run is kept as the
+evidence: `outputs/motion_1388f_20261013_223951`.
+
+Capture_1 (development; no inference). Before and after, both from the current code:
+
+| Metric | v1-equivalent (= accepted baseline) | Frozen v2 |
+|---|---|---|
+| People pairs | 435 | 391 |
+| People abs speed error median / p90 | 0.013 / 0.096 m/s | 0.013 / 0.087 m/s |
+| People heading error median / p90 | 0.75° / 5.7° | 0.73° / 4.9° |
+| People motion-label agreement | 99.0% | 98.9% |
+| Static verified: estimates / labelled / false motion | 123 / 67 / 100% | 4 / 0 / — |
+| Static unverified: false motion | 12% | 0% |
+| Resets | 71 | 8 (all gaps) |
+| Person 41 (far, fragmented) pairs | 10 | 0 |
+
+What the Capture_1 change means:
+- The v1-equivalent run reproduces the accepted Step 8 `motion_states.csv` exactly.
+- Under v2, the coverage rule removes chair track 212's growing mask almost entirely. Static furniture is
+  therefore *not measured* on Capture_1 any more; this does not show it is fixed.
+- On Capture_2 the static control still has 230 labelled estimates, at 0% false motion.
+
+**Freeze.** `configs/motion_frozen.json` records:
+- the SHA-256 of `configs/motion_office.json` (`15821ff9ad4ebf4c5c9eda5f33d36ffa4d2faf08a6c4418df92019ec52661625`);
+- the Capture_2 decisions.
+
+Every motion run records its config hash and whether it is frozen. `--final-evaluation` refuses any other
+config. Captures 3–4 and Gym/dynamic have not been touched.
+
+```powershell
+.\.venv\Scripts\python.exe run_segmentation.py --capture Synthetic_Scenes/Office/dynamic/Capture_2 --all-frames
+.\.venv\Scripts\python.exe track_objects.py --segmentation-run outputs\seg_Office_dynamic_Capture_2_1388f_20261013_220700
+.\.venv\Scripts\python.exe verify_tracking_run.py outputs\track_1388f_20261013_221603
+.\.venv\Scripts\python.exe fuse_objects.py --tracking-run outputs\track_1388f_20261013_221603 --capture Synthetic_Scenes/Office/dynamic/Capture_2
+.\.venv\Scripts\python.exe make_proxy_route.py --fusion-run outputs\fuse_1388f_20261013_222006 --out configs\proxy_route_office_capture2.json
+.\.venv\Scripts\python.exe estimate_motion.py --fusion-run outputs\fuse_1388f_20261013_222006 --route-config configs\proxy_route_office_capture2.json
+.\.venv\Scripts\python.exe report_motion.py --motion-run outputs\motion_1388f_<date>_<time> --before-run outputs\motion_1388f_<v1-equivalent run> --label adjustment
+```
+
+On macOS, use `.venv/bin/python` and forward slashes, and set `THUD_DATASET_ROOT`.
+
 ## Known limitations
 
 - Depth decoding is validated only for the THUD **synthetic** captures above. Real-scene depth and any
   monocular or relative depth model are not validated.
 - Steps 4 and 8 are a **reference-depth and reference-camera-pose baseline**. They do not measure an RGB-only
   depth model or an estimated camera pose.
-- Step 8 is evaluated on one 5 s development excerpt with 4 people (3 with motion pairs), and frames are highly
-  correlated. Time-to-route evaluation is inconclusive.
+- Step 8 has been evaluated on development and adjustment data only: Capture_1 (5 s, 4 people) and Capture_2
+  (23 s, 3 people). Frames are highly correlated, and time-to-route evaluation is inconclusive on both.
+- The mask-coverage rule drops many observations: 36% of all observations on Capture_2, and 102 of 509 person
+  observations.
+- Static furniture is still not a trusted motion class. On Capture_1 it is mostly removed, not measured.
 - The reference is a visible-surface proxy, not person-centre ground truth. Capture_3 and Capture_4 have not
   been used.
 - No passage width, clearance, occupancy map or movement decision is computed yet. `camera_proxy` is not the

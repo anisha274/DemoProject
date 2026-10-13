@@ -202,9 +202,10 @@ def ttr_section(ev: dict, rows: list[dict]) -> dict:
             "error_s_estimated_minus_realized": t["error_s_estimated_minus_realized"],
             "censored_total": sum(censored.values()), "censored": censored,
             "not_censored_other": {k: v for k, v in o.items() if k not in censored and k != "crossing_and_entered"},
-            "why_inconclusive": ("Only entries less than half a second ahead could be checked, because the sequence "
-                                 f"lasts {seq:.1f} s and most estimates' 5 s horizon runs past its end (censored). "
-                                 "This does not test time-to-route at useful look-ahead times."),
+            "why_inconclusive": (f"Only entries a median {ahead or 0:.2f} s ahead could be checked. Every other estimate is "
+                                 "censored: the sequence ended, or the person's reference visibility ended, before the "
+                                 "5 s horizon, so a later entry (or its absence) cannot be confirmed. This does not "
+                                 "test time-to-route at useful look-ahead times."),
             "sequence_duration_s": seq}
 
 
@@ -266,10 +267,14 @@ def write_markdown(rep: dict, path: Path) -> None:
           "|---|---|---|---|---|---|---|---|"]
     for iid, v in p["people"].items():
         if not v["pairs_with_both_estimates"]:
-            why = v["why_no_pairs"]
-            L.append(f"| {iid} | {', '.join(v['tracks'])} | 0 of {v['associated_observations']} associated | — | — | "
-                     f"no pairs: track {why['track_unreliable_reasons'] or why['track_motion_status']}; reference "
-                     f"{why['reference_proxy']} | — | — |")
+            if "why_no_pairs" in v:
+                why = v["why_no_pairs"]
+                L.append(f"| {iid} | {', '.join(v['tracks'])} | 0 of {v['associated_observations']} associated | — | — | "
+                         f"no pairs: track {why['track_unreliable_reasons'] or why['track_motion_status']}; reference "
+                         f"{why['reference_proxy']} | — | — |")
+            else:
+                L.append(f"| {iid} | {', '.join(v['tracks'])} | 0 | — | — | no frame where both the track and the "
+                         "reference have a velocity estimate | — | — |")
             continue
         s, h = v["abs_speed_error_mps"], v["heading_error_deg"]
         fmt = lambda d, k, f: format(d[k], f) if d.get("n") else "—"  # noqa: E731
