@@ -22,6 +22,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw
 
+import data_splits as ds
 import run_paths as rp
 import thud_data as td
 
@@ -179,10 +180,13 @@ def main() -> None:
     parser.add_argument("--capture")
     parser.add_argument("--other-sensor", default="camera", help="Sensor that shares RGB basenames")
     parser.add_argument("--steps", type=int, nargs="+", default=[0, 150, 299])
+    parser.add_argument("--final-evaluation", action="store_true",
+                        help="required for a final-evaluation capture (one run, frozen config)")
     args = parser.parse_args()
 
     cfg = td.load_config(args.config, args.dataset_root, args.capture)
     rp.set_active_roots(rp.roots_from_config(cfg))
+    ds.guard(ds.capture_key(cfg["capture_dir"], cfg["dataset_root"]), args.final_evaluation)
     main_sensor = cfg["rgb_sensor_id"]
     capture_dir = Path(cfg["capture_dir"])
     records = load_all_records(cfg)

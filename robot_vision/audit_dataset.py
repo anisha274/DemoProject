@@ -13,6 +13,7 @@ from pathlib import Path
 
 import numpy as np
 
+import data_splits as ds
 import run_paths as rp
 import thud_data as td
 
@@ -30,8 +31,8 @@ def audit_capture(cfg: dict, start: int, count: int, decode: bool = True) -> tup
     problems = td.blocking_problems(issues, seq)
 
     usable = td.usable_records(records, issues)
-    selected = usable[start:start + count]
-    if len(selected) < count:
+    selected = usable[start:] if count is None else usable[start:start + count]
+    if count is not None and len(selected) < count:
         problems.append(f"Requested {count} frames from index {start}, but only {len(selected)} matched "
                         f"frames are available (total usable: {len(usable)}).")
 
@@ -140,10 +141,13 @@ def main() -> None:
     parser.add_argument("--frames", type=int, default=3, help="Number of matched frames to audit")
     parser.add_argument("--start", type=int, default=0, help="Index of the first matched frame")
     parser.add_argument("--output-dir", type=Path, help="Where to write the report (default: a new folder)")
+    parser.add_argument("--final-evaluation", action="store_true",
+                        help="required for a final-evaluation capture (one run, frozen config)")
     args = parser.parse_args()
 
     cfg = td.load_config(args.config, args.dataset_root, args.capture)
     rp.set_active_roots(rp.roots_from_config(cfg))
+    ds.guard(ds.capture_key(cfg["capture_dir"], cfg["dataset_root"]), args.final_evaluation)
     report, _ = audit_capture(cfg, args.start, args.frames, decode=True)
     out_dir = args.output_dir or Path(cfg["output_root"]) / f"audit_{datetime.now():%Y%m%d_%H%M%S}"
     out_dir.mkdir(parents=True, exist_ok=False)

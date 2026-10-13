@@ -25,6 +25,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
+import data_splits as ds
 import run_paths as rp
 import thud_data as td
 from check_environment import device_name, select_device, verify_device
@@ -187,6 +188,7 @@ def run(args: argparse.Namespace) -> Path:
     frames, seg_info = load_segmentation_run(seg_dir)
     seg_cfg = td.load_config(rp.resolve(seg_info["config_path"], rp.make_roots(output_root=seg_dir.parent)))
     rp.set_active_roots(rp.make_roots(seg_cfg["dataset_root"], seg_dir.parent))
+    ds.guard(ds.capture_key(seg_cfg["capture_dir"], seg_cfg["dataset_root"]), args.final_evaluation)
     for f in frames:  # stored paths -> paths on this machine
         f["rgb_path"] = str(rp.resolve(f["rgb_path"], rp.active_roots()))
     check_frame_order(frames)
@@ -450,6 +452,8 @@ def main() -> None:
     parser.add_argument("--nms-iou", dest="nms_iou", type=float, help="Override NMS IoU threshold")
     parser.add_argument("--image-size", dest="image_size", type=int, help="Override inference image size")
     parser.add_argument("--output-root", type=Path)
+    parser.add_argument("--final-evaluation", action="store_true",
+                        help="required for a final-evaluation capture (one run, frozen config)")
     args = parser.parse_args()
     args.run_status = None
     try:

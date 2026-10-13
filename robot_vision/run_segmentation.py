@@ -22,6 +22,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw
 
+import data_splits as ds
 import run_paths as rp
 import thud_data as td
 from audit_dataset import audit_capture
@@ -199,6 +200,7 @@ def run(args: argparse.Namespace) -> Path:
     if args.output_root:
         cfg["output_root"] = str(Path(args.output_root).absolute())
     rp.set_active_roots(rp.roots_from_config(cfg))
+    ds.guard(ds.capture_key(cfg["capture_dir"], cfg["dataset_root"]), args.final_evaluation)
     class_names = cfg["project_classes"]
     if class_names[0] != "other" or len(class_names) > len(PROJECT_COLOURS):
         raise ValueError("project_classes must start with 'other' and have at most "
@@ -211,7 +213,7 @@ def run(args: argparse.Namespace) -> Path:
     print("Device tensor check: OK")
 
     # 2. Dataset metadata validation (images are checked again as each frame is loaded)
-    audit, frames = audit_capture(cfg, args.start, args.frames, decode=False)
+    audit, frames = audit_capture(cfg, args.start, None if args.all_frames else args.frames, decode=False)
     if not audit["ok"]:
         raise RuntimeError("Dataset validation failed:\n  " + "\n  ".join(audit["problems"]))
     for w in audit["warnings"]:
@@ -398,6 +400,9 @@ def main() -> None:
     parser.add_argument("--capture", help="Capture folder, relative to dataset root or absolute")
     parser.add_argument("--frames", type=int, default=3, help="Number of matched frames to process")
     parser.add_argument("--start", type=int, default=0, help="Index of the first matched frame")
+    parser.add_argument("--all-frames", action="store_true", help="Process every usable frame (ignores --frames)")
+    parser.add_argument("--final-evaluation", action="store_true",
+                        help="required for a final-evaluation capture (one run, frozen config)")
     parser.add_argument("--device", default="auto", choices=["auto", "cuda", "mps", "cpu"],
                         help="'cuda'/'mps'/'cpu' fail instead of falling back; 'auto' picks CUDA, MPS, then CPU")
     parser.add_argument("--output-root", type=Path, help="Overrides output_root from the config")

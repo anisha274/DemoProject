@@ -8,6 +8,7 @@ Heading = atan2(vx, vz) in degrees (0 = world +z, 90 = world +x).
 from __future__ import annotations
 
 import math
+from collections import Counter
 
 import numpy as np
 
@@ -37,6 +38,38 @@ def quality(obs: dict, rules: dict) -> tuple[bool, str]:
     if obs["depth_iqr_m"] > limit:
         return False, f"depth_spread_above_{src}_limit"
     return True, ""
+
+
+def coverage_flags(t: np.ndarray, counts: np.ndarray, window_s: float, max_ratio: float) -> np.ndarray:
+    """True where the selected-pixel count differs by more than max_ratio (either way) from any earlier
+    observation of the same track within window_s. Such observations do not update motion."""
+    flags = np.zeros(len(t), bool)
+    for i in range(len(t)):
+        if counts[i] <= 0:
+            continue
+        j = (t < t[i] - 1e-12) & (t >= t[i] - window_s - 1e-9) & (counts > 0)
+        if j.any():
+            r = counts[i] / counts[j]
+            flags[i] = bool(((r > max_ratio) | (r < 1 / max_ratio)).any())
+    return flags
+
+
+def vote_classes(t: np.ndarray, cls: list[str], window_s: float) -> list[str]:
+    """Track-level class: majority of the detector classes in the trailing window [t - window_s, t].
+    Ties keep the previous voted class when it is among the tied classes, else take the most recent one."""
+    out: list[str] = []
+    for i in range(len(t)):
+        sel = [cls[j] for j in range(i + 1) if t[j] >= t[i] - window_s - 1e-9]
+        counts = Counter(sel)
+        top = max(counts.values())
+        tied = {c for c, n in counts.items() if n == top}
+        if len(tied) == 1:
+            out.append(next(iter(tied)))
+        elif out and out[-1] in tied:
+            out.append(out[-1])
+        else:
+            out.append(next(c for c in reversed(sel) if c in tied))
+    return out
 
 
 # ---------------------------------------------------------------- segmentation (resets)
@@ -107,10 +140,14 @@ class Persistent:
         return self.current or "unknown"
 
 
-def moving_state(speed: float, previous: str | None, lab: dict) -> str:
-    if speed >= lab["moving_enter_speed_mps"]:
+def moving_state(speed: float, previous: str | None, lab: dict, speed_se: float = 0.0) -> str:
+    """Hysteresis on speed. With uncertainty_k = k > 0 the decision uses the k-sigma bounds of the speed:
+    moving only if speed - k*se >= enter, stationary only if speed + k*se <= exit; otherwise the previous state."""
+    k = lab.get("uncertainty_k", 0.0)
+    se = speed_se if (k and math.isfinite(speed_se)) else 0.0
+    if speed - k * se >= lab["moving_enter_speed_mps"]:
         return "moving"
-    if speed <= lab["moving_exit_speed_mps"]:
+    if speed + k * se <= lab["moving_exit_speed_mps"]:
         return "stationary"
     return previous or "unknown"
 

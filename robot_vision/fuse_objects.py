@@ -40,6 +40,7 @@ from scipy.optimize import linear_sum_assignment
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
+import data_splits as ds  # noqa: E402
 import run_paths as rp  # noqa: E402
 import thud_data as td  # noqa: E402
 import thud_depth as tdd  # noqa: E402
@@ -490,10 +491,11 @@ def draw_topdown(states: list[dict], frame_info: list[dict], eval_rows: list[dic
 
 def run(args: argparse.Namespace) -> Path:
     cfg = json.loads(resolve(args.config).read_text(encoding="utf-8"))
-    office = td.load_config(resolve(cfg["office_config"]))
+    office = td.load_config(resolve(cfg["office_config"]), capture=args.capture)
     rp.set_active_roots(rp.roots_from_config(office))
+    split = ds.guard(ds.capture_key(office["capture_dir"], office["dataset_root"]), args.final_evaluation)
     depth_cfg = tdd.load_depth_config(resolve(cfg["depth_config"]))
-    track_dir = resolve(cfg["tracking_run"])
+    track_dir = resolve(args.tracking_run or cfg["tracking_run"])
     if not (track_dir / "COMPLETE").exists():
         raise RuntimeError(f"Tracking run is not complete: {track_dir}")
     frames = [json.loads(l) for l in (track_dir / "frames.jsonl").read_text(encoding="utf-8").splitlines() if l]
@@ -528,7 +530,7 @@ def run(args: argparse.Namespace) -> Path:
         "command": " ".join(sys.argv), "config": cfg, "tracking_run": str(track_dir),
         "segmentation_run": json.loads((track_dir / "tracking_summary.json").read_text())["segmentation_run"],
         "capture_dir": str(capture_dir), "depth_config": depth_cfg, "intrinsics": ctx["K"],
-        "check_only": args.check_only, "steps": len(steps)})
+        "check_only": args.check_only, "steps": len(steps), "split": split})
     try:
         checks = geometry_checks(ctx, cfg["check_steps"])
         write_json(out / "geometry_checks.json", checks)
@@ -579,6 +581,9 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--config", default="configs/fusion_office.json")
     p.add_argument("--check-only", action="store_true", help="run geometry checks and fuse only the check steps")
+    p.add_argument("--tracking-run", help="overrides tracking_run in the config")
+    p.add_argument("--capture", help="capture relative to the dataset root (default: the office config's)")
+    p.add_argument("--final-evaluation", action="store_true")
     run(p.parse_args())
 
 

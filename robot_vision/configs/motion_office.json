@@ -2,14 +2,17 @@
   "baseline_label": "REFERENCE-DEPTH AND REFERENCE-CAMERA-POSE BASELINE",
   "baseline_note": "Positions come from THUD reference depth and the recorded reference camera poses (controlled experimental baseline). Results do not measure an RGB-only depth model or an estimated camera pose.",
 
-  "fusion_run": "outputs/fuse_300f_20261011_042733",
   "office_config": "configs/office.json",
   "depth_config": "configs/depth_thud_synthetic.json",
   "robot_config": "configs/robot.json",
   "splits_config": "configs/data_splits.json",
-  "route_config": "configs/proxy_route_office_capture1.json",
+  "inputs_note": "The fusion run and the route corridor are command-line inputs (--fusion-run, --route-config), so this file holds settings only and its hash identifies the frozen settings.",
 
-  "settings_provenance": "All values below were fixed from physical reasoning before any motion evaluation was run, and were not changed after seeing evaluation results. The Step 4 supplement statistics (development capture, timing and step sizes) had been seen. No value was adjusted on Capture_2.",
+  "settings_provenance": [
+    "v1 (Step 8, accepted): ground_plane, quality IQR limits, motion window/reset limits, labels and route settings fixed from physical reasoning before any motion evaluation; not changed after results.",
+    "v2 (declared 2026-10-13 before any Capture_2 use): motion_trust (design decision); class vote replaces reset-on-class-change; mask-coverage-change rule; evaluation.heading_min_speed_mps, distance_bins_m and ttr_lookahead_bins_s; labels.uncertainty_k with the decision rule in labels.uncertainty_k_decision.",
+    "Parameter adjustment is allowed only on Office/dynamic/Capture_2 (data_splits.json)."
+  ],
 
   "ground_plane": {
     "vertical_axis": "y",
@@ -22,8 +25,14 @@
     "class_mask_max_depth_iqr_m": 0.5,
     "fallback_allowed": true,
     "fallback_max_depth_iqr_m": 0.25,
-    "rule": "reliable = position_valid AND depth IQR of the selected pixels <= the limit for its pixel_source (class_mask 0.5 m, fallback 0.25 m). A larger IQR means at least a quarter of the pixels lie well apart from another quarter (two surfaces, e.g. an occluder in front): flagged unreliable, never resolved by picking the nearest depth cluster. No reference data is used.",
-    "why": "0.5 m is about the visible depth extent of one person or chair; the fallback (box minus wall/floor/ceiling) is more exposed to other objects, so its limit is stricter."
+    "rule": "reliable = position_valid AND depth IQR of the selected pixels <= the limit for its pixel_source (class_mask 0.5 m, fallback 0.25 m) AND not flagged by coverage_change. A larger IQR means at least a quarter of the pixels lie well apart from another quarter (two surfaces, e.g. an occluder in front): flagged unreliable, never resolved by picking the nearest depth cluster. No reference data is used.",
+    "why": "0.5 m is about the visible depth extent of one person or chair; the fallback (box minus wall/floor/ceiling) is more exposed to other objects, so its limit is stricter.",
+    "coverage_change": {
+      "window_s": 0.25,
+      "max_ratio": 2.0,
+      "rule": "an observation whose selected-pixel count is more than max_ratio times larger or smaller than that of any earlier observation of the same track within window_s is flagged mask_coverage_change and does not update motion",
+      "why": "a person walking at 1.5 m/s toward the camera from 2 m changes apparent area by about 1.4x in 0.25 s; a mask that doubles or halves that fast is a segmentation coverage change (Step 8 chair track 212), not motion. A step change flags every observation for window_s (0.25 s > max_gap_s 0.2 s), so the segment restarts after it."
+    }
   },
 
   "motion": {
@@ -33,9 +42,11 @@
     "max_gap_s": 0.2,
     "jump_base_m": 0.5,
     "max_plausible_speed_mps": 3.0,
-    "reset_on_class_change": true,
+    "reset_on_class_change": false,
+    "class_vote_window_s": 1.0,
     "estimator": "least-squares line fit of ground-plane x(t) and z(t) over the trailing window of reliable observations in the current segment; slope = velocity, line value at the current time = filtered position",
-    "reset_rules": "a new segment starts when the gap since the previous reliable observation exceeds max_gap_s, when the ground-plane jump exceeds jump_base_m + max_plausible_speed_mps * dt, or when the detector class changes"
+    "reset_rules": "a new segment starts only when the gap since the previous reliable observation exceeds max_gap_s, or when the ground-plane jump exceeds jump_base_m + max_plausible_speed_mps * dt",
+    "class_vote": "motion_class = majority of the track's detector classes over the trailing class_vote_window_s (ties keep the previous vote). It replaces reset-on-class-change and is used for motion_trusted and per-class reporting; Step 4 pixel selection is unchanged."
   },
 
   "labels": {
@@ -44,12 +55,15 @@
     "radial_min_speed_mps": 0.20,
     "range_rate_deadband_mps": 0.20,
     "persistence_s": 0.2,
-    "rule": "World speed hysteresis: moving at >= enter, stationary at <= exit, otherwise the previous state. A moving object is approaching / moving_away when its OWN world velocity component toward / away from camera_proxy is at least radial_min_speed_mps, otherwise moving_lateral. A new label is emitted only after it has persisted for persistence_s."
+    "uncertainty_k": 0.0,
+    "uncertainty_k_candidates": [0.0, 2.0],
+    "uncertainty_k_decision": "declared before running Capture_2: adopt k = 2 if, on Capture_2, it lowers the static-verified false-motion rate AND lowers the person motion-label agreement by at most 2 percentage points; otherwise keep k = 0.",
+    "rule": "World speed hysteresis: moving at speed - k*se >= enter, stationary at speed + k*se <= exit, otherwise the previous state (k = uncertainty_k, se = speed standard error). A moving object is approaching / moving_away when its OWN world velocity component toward / away from camera_proxy is at least radial_min_speed_mps, otherwise moving_lateral. A new label is emitted only after it has persisted for persistence_s."
   },
 
   "motion_trust": {
     "dynamic_classes": ["person"],
-    "rule": "motion_trusted = true only for an estimated motion of a detector class in dynamic_classes. Other classes keep their motion values with motion_trusted = false.",
+    "rule": "motion_trusted = true only for an estimated motion whose motion_class is in dynamic_classes. Other classes keep their motion values with motion_trusted = false.",
     "use": "Step 9 decision rules use only trusted motion. Static obstacles enter decisions through the passage-width map, not through motion labels.",
     "why": "Design decision, not tuning. Furniture motion error is systematic drift: mask coverage changes and a viewpoint-dependent visible-surface point (46% false motion even on the reference visible point). A longer window averages noise but cannot remove drift that follows the camera's path."
   },
@@ -64,7 +78,11 @@
 
   "evaluation": {
     "reference_min_pixels": 50,
-    "direction_min_speed_mps": 0.3,
+    "heading_min_speed_mps": 0.3,
+    "heading_rule": "heading error is reported only where the REFERENCE speed >= heading_min_speed_mps; excluded pairs are counted",
+    "distance_bins_m": [0, 3, 6],
+    "distance_rule": "ground-plane distance from camera_proxy to the observation's visible-surface point, from any valid-depth pixels (also for observations whose position is invalid); no valid depth -> unknown",
+    "ttr_lookahead_bins_s": [0, 1, 3, 5],
     "person_reference_labels": ["people"],
     "static_verified_reference_labels": ["Chair", "Desk", "Sofa"],
     "static_unverified_reference_labels": ["Computer", "Plants", "Book"]

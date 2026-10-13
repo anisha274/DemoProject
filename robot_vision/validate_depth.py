@@ -26,6 +26,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
+import data_splits as ds
 import run_paths as rp
 import thud_data as td
 import thud_depth as tdd
@@ -275,9 +276,13 @@ def main() -> None:
                         help="Used for dataset_root and output_root")
     parser.add_argument("--dataset-root")
     parser.add_argument("--fit-capture", default="Synthetic_Scenes/Office/dynamic/Capture_1")
+    # Gym/dynamic/Capture_1 was a test capture in the recorded Stage 3 run; it is now in the cross-scene
+    # final-evaluation split, so it is no longer a default.
     parser.add_argument("--test-captures", nargs="*", default=[
         "Synthetic_Scenes/Office/dynamic/Capture_2", "Synthetic_Scenes/Office/static/Capture_1",
-        "Synthetic_Scenes/Gym/dynamic/Capture_1", "Synthetic_Scenes/Gym/static/Capture_1"])
+        "Synthetic_Scenes/Gym/static/Capture_1"])
+    parser.add_argument("--final-evaluation", action="store_true",
+                        help="required for a final-evaluation capture (one run, frozen config)")
     parser.add_argument("--stride", type=int, default=10, help="Use every Nth step")
     parser.add_argument("--margin", type=float, default=0.03, help="Allowed distance outside a 3D box (m)")
     parser.add_argument("--min-pixels", type=int, default=200)
@@ -291,6 +296,8 @@ def main() -> None:
     out_dir = Path(cfg["output_root"]) / f"depth_check_{datetime.now():%Y%m%d_%H%M%S}"
     out_dir.mkdir(parents=True, exist_ok=False)
 
+    for cap in [args.fit_capture, *args.test_captures]:
+        ds.guard(cap, args.final_evaluation)
     print(f"Collecting fit capture {args.fit_capture} ...")
     fit_data = collect(root / args.fit_capture, args.stride, args.min_pixels, args.max_pixels, rng)
     fitted = fit(fit_data, args.margin)
