@@ -46,3 +46,4 @@ logs/
 .env
 .vscode/
 .idea/
+CLAUDE.local.md
