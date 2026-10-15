@@ -122,8 +122,8 @@ def plot(decisions, out: Path, title_note: str) -> None:
     ax.set_xlabel("capture time (s)", color=ink, fontsize=9)
 
     fig.suptitle(f"Step 9 decision timeline: {LABEL}", x=0.01, ha="left", fontsize=12, color=ink)
-    fig.text(0.01, 0.935, title_note, ha="left", fontsize=8.5, color=muted)
-    fig.subplots_adjust(left=0.17, right=0.95, top=0.88, bottom=0.07)
+    fig.text(0.01, 0.948, title_note, ha="left", va="top", fontsize=8.5, color=muted, linespacing=1.5)
+    fig.subplots_adjust(left=0.17, right=0.95, top=0.86, bottom=0.07)
     fig.savefig(out, dpi=130, facecolor=surface)
     plt.close(fig)
 
@@ -188,8 +188,9 @@ def main() -> None:
         "decision_config": cfg, "replay_script": script})
     dio.write_json(out / "run_info.json", info)
     dio.write_decisions(out, decisions, {"labels": labels, "git": info["git"], "required_width": req})
-    note = (f"{minfo['capture']} (adjustment split) | people: frozen Step 8 motion, reference-depth and "
-            f"reference-camera-pose baseline | corridor: proxy_route, {engine.corridor_width_m:.2f} m | robot: "
+    note = (f"{minfo['capture']} ({split} split) | people: frozen Step 8 motion, reference-depth and "
+            f"reference-camera-pose baseline
+corridor: proxy_route, {engine.corridor_width_m:.2f} m | robot: "
             f"camera_proxy | passage and gestures: scripted placeholders | load: {load['label']}")
     plot(decisions, out / "decision_timeline.png", note)
     dio.mark_complete(out)
