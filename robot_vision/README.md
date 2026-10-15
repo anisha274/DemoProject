@@ -54,7 +54,8 @@ The teammate's gesture code lives in a separate repository
 | `replay_decisions.py` | Optional demo: frozen Step 8 motion run + `proxy_route` + placeholder passage and scripted gestures. |
 | `configs/decision.json` | Step 9 thresholds and timing, declared before any decision run. |
 | `configs/load.json` | Carried load: centred Euro pallet, 0.80 m across travel, "configured, not measured". |
-| `footprint.py` | The one required-width function (robot.json + load.json) and the decision look-ahead; standard library only. |
+| `footprint.py` | The one required-width function (robot.json + load.json), the decision look-ahead and the caution distance; standard library only. |
+| `person_box_depth.py` | Lower-bound distance (5th percentile of valid box depths) of tracked people, for Step 9 people without a position. |
 | `configs/replay_script_office_capture2.json` | Placeholder passage and scripted gestures for the Capture_2 replay demo. |
 | `tests/test_decision.py`, `tests/scenarios/*.json` | Step 9 tests; scenarios are plain JSON so they can be replayed in Unity. |
 
@@ -540,11 +541,12 @@ export THUD_DATASET_ROOT=/Volumes/Data/RGB-D
 The fusion run must exist locally. `make_proxy_route.py` needs re-running only if the robot or load footprint
 changes; `estimate_motion.py` refuses a corridor whose width disagrees with the one required width
 (`footprint.load_footprint`, see Step 9).
-- **Width change since Step 9 (2026-10-15).** The committed `proxy_route` files are still 0.80 m wide (robot only,
-  made before the load was configured). They are the inputs of the recorded Step 8 runs and are kept unchanged.
-  With the Euro pallet the required width is 1.00 m, so `estimate_motion.py` now refuses these files.
-  Regenerate them with `make_proxy_route.py` before any further Step 8 run with a route (for example the final
-  evaluation). The frozen motion config is not affected: the route is a command-line input.
+- **Width change since Step 9 (2026-10-15).** The `proxy_route` files were regenerated with `make_proxy_route.py`
+  at the required 1.00 m (Euro pallet). Only `width_m`, `width_rule` and `width_note` changed; the centrelines are
+  identical.
+  - The recorded Step 8 runs used the earlier 0.80 m (robot-only) files. Copies of those are kept in each run's
+    `config_used/` and in git history.
+  - The frozen motion config is not affected, because the route is a command-line input.
 - **Step 8 route fields are proxies.** `route_label`, `route_status`, `dist_to_route_centreline_m`,
   `time_to_route_*` and `p_enter_route_within_horizon` in `motion_states.csv`, and the `proxy_route` `width_m`, are
   not read by Step 9 decisions. Decisions read only the `proxy_route` centreline.
@@ -859,7 +861,8 @@ Windows PowerShell:
 cd E:\RobotVisionWorkspace\robot_vision
 .\.venv\Scripts\python.exe -m unittest tests.test_decision -v
 .\.venv\Scripts\python.exe run_decisions.py --all-scenarios
-.\.venv\Scripts\python.exe replay_decisions.py --motion-run outputs\motion_1388f_20261013_223619 --route-config configs\proxy_route_office_capture2.json --script configs\replay_script_office_capture2.json
+.\.venv\Scripts\python.exe person_box_depth.py --motion-run outputs\motion_1388f_20261013_223619
+.\.venv\Scripts\python.exe replay_decisions.py --motion-run outputs\motion_1388f_20261013_223619 --route-config configs\proxy_route_office_capture2.json --script configs\replay_script_office_capture2.json --person-depth-run outputs\person_box_depth_511obs_20261015_220051
 ```
 
 macOS Terminal:
@@ -868,11 +871,12 @@ macOS Terminal:
 cd /path/to/RobotVisionWorkspace/robot_vision
 .venv/bin/python -m unittest tests.test_decision -v
 .venv/bin/python run_decisions.py --all-scenarios
-.venv/bin/python replay_decisions.py --motion-run outputs/motion_1388f_20261013_223619 --route-config configs/proxy_route_office_capture2.json --script configs/replay_script_office_capture2.json
+.venv/bin/python person_box_depth.py --motion-run outputs/motion_1388f_20261013_223619
+.venv/bin/python replay_decisions.py --motion-run outputs/motion_1388f_20261013_223619 --route-config configs/proxy_route_office_capture2.json --script configs/replay_script_office_capture2.json --person-depth-run outputs/person_box_depth_511obs_20261015_220051
 ```
 
 The tests and `run_decisions.py` need no dataset. `replay_decisions.py` needs only the local Step 8 and Step 4 run
-folders (no dataset, no inference).
+folders. `person_box_depth.py` also reads the capture's depth images from the dataset root. No inference is rerun.
 
 ### Input contract (`decision.py`)
 
@@ -881,7 +885,7 @@ later, Unity frames use the same code; only the providers differ.
 
 | Dataclass | Fields |
 |---|---|
-| `PersonState` | `track_id`, `timestamp`, `position_xz` (ground plane, or None), `distance_m`, `motion_label`, `velocity_xz` (or None), `motion_trusted` |
+| `PersonState` | `track_id`, `timestamp`, `position_xz` (ground plane, or None), `distance_m`, `motion_label`, `velocity_xz` (or None), `motion_trusted`, `distance_lower_bound_m` (or None; used only for a person without a position) |
 | `PassageState` | `status` (clear / too_narrow / blocked / unknown / not_evaluated), `available_width_m` (or None), `required_width_m` |
 | `GestureEvent` | `timestamp`, `track_id` (or None), `gesture` (STOP / MOVE / NONE), `confidence` |
 | `RouteCorridor` | `centreline_xz` (polyline in travel order), `width_m`, `label` |
@@ -898,20 +902,34 @@ later, Unity frames use the same code; only the providers differ.
 
 ### Changes after the replay demo (design decisions, not tuning)
 
-These decisions were made on 2026-10-15 by the project owner after reviewing the first Capture_2 replay demo, and
+All of these were made on 2026-10-15 by the project owner, in two reviews of the Capture_2 replay demo, and
 before any evaluation. They were not tuned on any result, and no decision result is a measurement.
 
-| Change | Before (first version, `60f6e1d`) | Now (`2a9ed63`, `cc89948`) |
-|---|---|---|
-| Look-ahead | Rule 1 used the whole corridor ahead; in the demo a person 6.70 m ahead on the route caused STOP | Rule 1 applies only inside the **stop zone**: the corridor within `look_ahead_m` = 3.0 m ahead. Rule 2 predicts entry into the stop zone |
-| Robot speed | not configured | `robot.json`: `max_speed_mps` 1.0, `decel_mps2` 0.5 |
-| Load | 0.70 m tray, required width 0.90 m | Centred Euro pallet (1.20 × 0.80 m, 0.80 m side across travel): required width **1.00 m** |
-| Required width | Computed in `decision.py`; Step 8 used its own robot-only rule; the engine widened narrower corridors | One function, `footprint.required_width`, reached through `footprint.load_footprint` (robot.json + the load file it names). Used by decisions, `make_proxy_route.py` and the `estimate_motion.py` corridor check. A corridor of any other width is refused |
+| Review | Change | Before | Now |
+|---|---|---|---|
+| 1 | Look-ahead | Rule 1 used the whole corridor ahead. In the demo, a person 6.70 m ahead on the route caused STOP | Rule 1 applies only inside the **stop zone**: the corridor within `look_ahead_m` = 3.0 m. Rule 2 predicts entry into the stop zone |
+| 1 | Robot speed | not configured | `robot.json`: `max_speed_mps` 1.0, `decel_mps2` 0.5 |
+| 1 | Load | 0.70 m tray, required width 0.90 m | Centred Euro pallet (1.20 × 0.80 m, 0.80 m side across travel): required width **1.00 m** |
+| 1 | Required width | Computed in `decision.py`; Step 8 used its own robot-only rule; the engine widened narrower corridors | One function, `footprint.required_width`, reached through `footprint.load_footprint`. Used by decisions, `make_proxy_route.py` and the `estimate_motion.py` corridor check. A corridor of any other width is refused |
+| 2 | Caution band | `caution_ahead_m` = 3.0 m, equal to the look-ahead, so no corridor lay in the caution zone beyond the stop zone | `caution_ahead_m` = robot stopping distance + `person_speed_mps` × robot stopping time = 1.5 + 1.4 × 2.5 = **5.0 m** |
+| 2 | Unlocated person | Released by `distance_m` > caution distance, where `distance_m` is a median | Released only by `distance_lower_bound_m` > caution distance. This is the 5th percentile of valid depths in the person's box. No valid depth → no release |
+| 2 | STOP gesture hold | `stop_hold_frames` = 3 (accepted on the 3rd event: 0.03 s at 60 Hz, 0.2 s at 10 Hz) | `stop_hold_s` = 0.2 s, independent of the frame rate |
+| 2 | Proxy routes | 0.80 m (robot only) | Regenerated at 1.00 m with `make_proxy_route.py`; centrelines unchanged |
 
-**Implementation bug found while checking the revised replay (`cc89948`).** The flat end of the zones was also
-applied where the route itself ends. A person just past the end of a short remaining route was then outside every
-zone: in the replay, track 1440 at 21.6 s, which the first version had stopped for. The zones now stay round at
-the route end, and a test covers this. The replay run made with the bug is superseded (see the demo below).
+Fixes found while checking the replays. These are implementation errors, not rule changes:
+- **Zone end at the route end (`cc89948`).** The flat zone end was also applied where the route itself ends, so a
+  person just past the end of a short remaining route was outside every zone. The zones now stay round there.
+- **Reason text (`5ffd04e`).** A person inside the corridor beyond the stop zone was described as "−0.03 m from
+  corridor edge". The reason now reads "inside the corridor beyond the stop zone, X m ahead".
+- **Absolute path (`5ffd04e`).** `person_box_depth.py` copied `office.json` raw, which put the absolute dataset root
+  into its run folder; `test_run_paths` caught this. The script now writes portable paths. The one affected folder
+  was rewritten with `migrate_run_paths.py`; the original is in `_path_migration_backup/`.
+- **Correction of an earlier statement.** The first review said the median exception "released each" of the 16
+  replay observations without a valid position. That count came from `motion_states.csv`, not from the engine.
+  - In the engine, 14 of the 16 (track 2, steps 6–31) still had a remembered valid position from less than 1 s
+    earlier. They were assessed with it, and the unlocated rule did not apply to them.
+  - The rule applied to 2 assessments (track 773, steps 765–766). The median (8.96 and 8.94 m) released both.
+    The decision was STOP rule 3 anyway, because of the scripted STOP gesture.
 
 ### Required width (configured, not measured)
 
@@ -926,32 +944,31 @@ line) + 2 × `safety_margin_per_side_m`. It is computed only by `footprint.requi
   - the same pallet at +0.20 m: extents −0.30 to +0.60 m, so 1.10 m (likewise mirrored to the left);
   - a load narrower than the robot: 0.80 m;
   - no load: 0.80 m.
-- **Corridor width.** The decision corridor width must equal `required_width_m`. Decisions read only the
-  `proxy_route` centreline, never its `width_m` (0.80 m, robot only). They also never read the Step 8 route fields
-  in `motion_states.csv`; those stay labelled as proxies.
+- **Corridor width.** The decision corridor width must equal `required_width_m`. The `proxy_route` files are now
+  1.00 m too, but decisions read only their centreline. Decisions never read the Step 8 route fields in
+  `motion_states.csv`; those stay labelled as proxies.
 
-### Look-ahead and zones
+### Look-ahead, caution distance and zones
 
-`look_ahead_m = v × reaction_s + v² / (2 × decel) + buffer_m` = 1.0 × 0.5 + 1.0² / (2 × 0.5) + 1.5
-= 0.5 + 1.0 + 1.5 = **3.0 m**.
-- **Inputs:** `v` = `max_speed_mps` and `decel` = `decel_mps2` come from `robot.json`; `reaction_s` and
-  `buffer_m` come from `decision.json`.
-- **Stored values:** `decision.json` → `look_ahead` holds the formula, the inputs and the computed value.
-  `footprint.look_ahead` recomputes the value and refuses a mismatch.
-- **Range check:** loading also refuses `caution_ahead_m` < `look_ahead_m`. At the declared values they are equal
-  (3.0 m).
+| Quantity | Formula | Inputs | Value |
+|---|---|---|---|
+| `look_ahead_m` | v × reaction_s + v² / (2 × decel) + buffer_m | v 1.0 m/s, decel 0.5 m/s² (robot.json); reaction_s 0.5 s, buffer_m 1.5 m (decision.json) | 0.5 + 1.0 + 1.5 = **3.0 m** |
+| stopping distance | v × reaction_s + v² / (2 × decel) | as above | 0.5 + 1.0 = 1.5 m |
+| stopping time | reaction_s + v / decel | as above | 0.5 + 2.0 = 2.5 s |
+| `caution_ahead_m` | stopping distance + person_speed_mps × stopping time | person_speed_mps 1.4 m/s (decision.json) | 1.5 + 1.4 × 2.5 = **5.0 m** |
 
-Zones:
-- **Stop zone.** The corridor from the robot's projected position to `look_ahead_m` ahead. Its far end is
-  flat, so a person 0.1 m beyond the look-ahead on the centre line is outside it.
-  - The near end is round, which covers the robot body.
-  - Where the route itself ends sooner, that end is round too.
+- **Stored values.** `decision.json` stores both formulas, their inputs and the computed values (`look_ahead`,
+  `caution_ahead`).
+- **Checks.** `footprint.look_ahead` and `footprint.caution_ahead` recompute the values and refuse a stale one.
+  Loading also refuses `caution_ahead_m` < `look_ahead_m`.
+- **Stop zone.** The corridor from the robot's projected position to `look_ahead_m` ahead, with a flat far end.
+  The near end is round, which covers the robot body. Where the route itself ends sooner, that end is round too.
 - **Caution zone.** Outside the stop zone, within `caution_lateral_m` (1.0 m) of the corridor edge, up to
-  `caution_ahead_m` (3.0 m) ahead, with a flat far end.
-  - Because `caution_ahead_m` = `look_ahead_m`, it contains no corridor beyond the stop zone. An untrusted person
-    standing in the corridor 3.1 m ahead is in neither zone and does not stop the robot.
-  - The robot stops once that person is within 3.0 m. This is the declared behaviour, and `look_ahead_boundary`
-    records it.
+  `caution_ahead_m` (5.0 m) ahead, with a flat far end. It includes the corridor itself between 3.0 m and 5.0 m.
+  For people standing in the corridor:
+  - untrusted at 4.5 m → STOP (rule 4);
+  - trusted stationary at 4.5 m → no STOP;
+  - untrusted at 5.5 m → no STOP.
 - **Rule 2 prediction.** The person's constant velocity is checked against the current stop zone, sampled every
   0.05 s up to `entry_horizon_s` (3.0 s).
   - This covers sideways entry and head-on approach.
@@ -965,8 +982,8 @@ Zones:
 |---|---|---|---|
 | 1 | Person inside the stop zone (latest valid position; no motion needed) | STOP | `person in route: track 1 0.20 m from centre line, 2.50 m ahead (stop zone 3.00 m)` |
 | 2 | Person predicted to enter the stop zone within `entry_horizon_s` (trusted motion only) | STOP | `person entering stop zone: track 21 predicted to enter in 2.00 s (within 3.0 s), 2.00 m away, closing at 1.00 m/s` |
-| 3 | Valid STOP gesture from anyone | STOP | `STOP gesture: track 7 (confidence 0.90, 3 frames)` |
-| 4 | Person in the caution zone without trusted motion | STOP | `cannot confirm person's movement: track 3 in caution zone (0.40 m from corridor edge, 2.00 m ahead), motion untrusted` |
+| 3 | Valid STOP gesture from anyone | STOP | `STOP gesture: track 7 (confidence 0.90, held 0.20 s)` |
+| 4 | Person in the caution zone without trusted motion | STOP | `cannot confirm person's movement: track 30 in caution zone (inside the corridor beyond the stop zone, 4.50 m ahead), motion untrusted` |
 | 5 | Passage blocked / unknown / not_evaluated | WAIT | `cannot confirm passage is clear: status unknown` |
 | 6 | MOVE requested but passage too narrow | STOP | `load too wide: 0.85 m available, 1.00 m needed` |
 | 7 | Valid MOVE held for `move_hold_s` and passage clear | MOVE | `passage clear: 1.50 m available, 1.00 m needed` |
@@ -982,7 +999,8 @@ Definitions (also in `configs/decision.json` → `conventions`):
   - `distance_m` ≤ `motion_range_m` (6.0 m).
 - **Person memory.** A tracked person who drops out, or whose position becomes invalid, keeps the latest valid
   position for `person_memory_s` (1.0 s). It still counts for rule 1 and the caution zone (reason:
-  `(remembered position)`).
+  `(remembered position)`). `person_memory_s` equals `resume_hold_s` (1.0 s), so after a dropout nothing is released
+  for at least memory + resume hold = 2 s.
 - **STOP overrides MOVE.** Any current STOP gesture cancels every MOVE gesture, even before it is accepted, so a
   STOP from one person always overrides a MOVE from another. While the STOP is unconfirmed the result is WAIT
   (rule 8); once accepted, it is STOP (rule 3).
@@ -993,29 +1011,35 @@ Definitions (also in `configs/decision.json` → `conventions`):
 
 ### A person without a position ("unlocated")
 
-A person is detected but has no usable ground-plane position: no current position and no remembered one. They
-count as **in the caution zone** unless their `distance_m` is beyond `caution_ahead_m` (3.0 m). Being "known to be
-more than 3 m away" therefore means a provider supplied a distance even though it could not supply a position:
-- **THUD replay (Step 8).** `distance_m` is the ground-plane distance from `camera_proxy` to the per-axis median of
-  the back-projected pixels that have valid depth, among the pixels selected for the track.
-  - It exists whenever any selected pixel has valid depth, including observations whose position is invalid
-    (`position_valid` false: too few valid-depth pixels, mostly saturated depth, or an unusable pixel selection).
-  - With no valid-depth pixel there is no distance, and the person always counts as in the caution zone.
-- **Unity (later).** The scene adapter must supply `distance_m` from its own range measurement, or None.
-- **Caveat: a median, not a lower bound.** If the selected pixels mix the person with a farther background, the
-  median can be farther than the person, and the exception can release a person who is in fact close.
-  - In the replay this affected every case. All 16 person observations without a valid position used
-    `box_all` (the whole detection box), and all 16 had `distance_m` > 3 m, so the exception released each of them.
-  - A safer variant, not adopted: require a lower bound (for example a near depth percentile) or drop the
-    exception.
+A person is detected but has neither a current nor a remembered ground-plane position. They count as **in the
+caution zone** unless `PersonState.distance_lower_bound_m` is greater than `caution_ahead_m` (5.0 m). `distance_m`
+(a median in THUD) is never used for this.
+- **THUD (`person_box_depth.py`, reference-depth baseline).** The lower bound is the 5th percentile
+  (`decision.json` → `unlocated_distance.box_depth_percentile`) of the valid planar depths inside the person's
+  detection box.
+  - Background and other objects in the box only add depths, so low percentiles stay at or below the person's own
+    depth: errors go in the safe direction.
+  - The recorded camera pitch and roll are exactly 0 in every frame (checked: max |qx| = max |qz| = 0), so the
+    ground distance from the camera is at least the planar depth.
+  - Saturated pixels are invalid. A box without valid depth gets no lower bound, so the person stays in the
+    caution zone.
+  - Only predicted boxes (Step 4) and depth images are read; no annotations or reference masks.
+- **Unity (later).** The scene adapter must supply its own lower bound, or None.
+- **Check.** In 1 of 511 person boxes, the 5th percentile is above Step 4's selected-pixel median, by 0.15 mm (a
+  close person filling the box).
+- **Replay result.** Of the 16 person observations without a valid position, **none is released now**.
+  - 14 are assessed with a remembered position (unchanged).
+  - 2 are unlocated (track 773, steps 765–766): lower bounds 3.85 and 3.83 m, below 5.0 m, so both are kept in
+    the caution zone.
+  - Before this change, the median (8.96 and 8.94 m) released both.
 
 ### Timing (`configs/decision.json`)
 
 | Setting | Value | Meaning |
 |---|---|---|
-| `stop_hold_frames` | 3 | STOP gesture accepted after 3 consecutive gesture frames |
+| `stop_hold_s` | 0.2 s | STOP gesture accepted after being held 0.2 s |
 | `move_hold_s` | 0.5 s | MOVE gesture accepted after being held 0.5 s |
-| `gesture_timeout_s` | 0.5 s | a gesture older than this counts as NONE |
+| `gesture_timeout_s` | 0.5 s | a gesture older than this counts as NONE; a gesture is held while its events arrive at most this far apart |
 | `gesture_min_confidence` | 0.6 | below this a gesture counts as NONE |
 | `resume_hold_s` | 1.0 s | MOVE only after the rule-7 conditions hold continuously for 1 s |
 
@@ -1025,24 +1049,29 @@ more than 3 m away" therefore means a provider supplied a distance even though i
 - **Provenance.**
   - The first version's values were declared on 2026-10-15 before any decision run, chosen from physical
     reasoning (`decision.json` → `why`).
-  - The look-ahead, load and single-width changes were made later the same day, after the replay demo (see
-    above).
+  - The changes in the table above came after the replay demo.
   - Nothing has been tuned, and nothing has been evaluated.
 
 ### Outputs
 
 Each run writes a new folder; existing folders are never overwritten.
+- `person_box_depth.py` → `outputs/person_box_depth_<N>obs_<date>_<time>/`:
+  - `person_box_depth.csv`: box, valid-depth pixel count, depth percentile and box median per person observation;
+  - `run_info.json`: git commit, config hashes, pitch/roll check, coverage;
+  - `config_used/`.
 - `run_decisions.py` → `outputs/decisions_scenarios_<date>_<time>/`:
-  - `run_info.json`: git commit, config hashes, footprint, look-ahead;
+  - `run_info.json`: git commit, config hashes, footprint, look-ahead and caution distance;
   - `config_used/`: decision.json, robot.json, load.json;
   - `summary.json`: expectation check per scenario;
   - one subfolder per scenario, holding the scenario file, `decisions.csv` and `decision_log.json`.
 - `replay_decisions.py` → `outputs/decisions_replay_<N>f_<date>_<time>/`: the same files plus the route, script
-  and frozen-motion records in `config_used/`, and `decision_timeline.png`.
+  and frozen-motion records in `config_used/`, and `decision_timeline.png`. Give `--person-depth-run` to supply the
+  lower bounds; without it, unlocated people always count as in the caution zone.
 - **`decisions.csv`** has one row per timestamp: decision, rule, rule name, plain-English reason with numbers,
   contributing track IDs, passage status (input and effective), widths, person counts and active gestures.
 - **`decision_log.json`** holds the same records with a full snapshot of the inputs: every person's assessment,
-  including stop-zone and caution-zone membership, gap and closing speed, plus the passage and the gesture state.
+  including stop-zone and caution-zone membership, gap, closing speed and lower bound, plus the passage and the
+  gesture state.
 
 ### Tests (`tests/test_decision.py`, no dataset)
 
@@ -1053,12 +1082,13 @@ Each run writes a new folder; existing folders are never overwritten.
   - `conflict_narrow_passage_with_move`.
 - Gestures: `gesture_timeout` and `gesture_low_confidence`.
 - Timing and motion: `asymmetric_timing`, `unknown_motion` and `beyond_motion_range`.
-- Look-ahead: `look_ahead_boundary` and `head_on_approach`.
-- Look-ahead unit tests:
-  - the formula, and a stale declared value is refused;
+- Zones: `look_ahead_boundary`, `head_on_approach`, `caution_band` and `unlocated_person`.
+- Look-ahead and caution unit tests:
+  - both formulas, and stale declared values are refused;
   - `caution_ahead_m` ≥ `look_ahead_m` is enforced;
   - in route at `look_ahead_m` − 0.1 m → STOP;
   - at `look_ahead_m` + 0.1 m, standing still → not STOP;
+  - in the corridor at 4.5 m: untrusted → STOP, trusted stationary → not STOP; untrusted at 5.5 m → not STOP;
   - head-on approach from 5 m → STOP (rule 2) while the person is still outside the stop zone;
   - sideways entry, with the gap reported;
   - the flat stop-zone end, and a round end where the route ends.
@@ -1067,51 +1097,54 @@ Each run writes a new folder; existing folders are never overwritten.
   - `required_width` is defined only in `footprint.py`;
   - a corridor of any other width is refused.
 - Other unit tests:
+  - the unlocated-person exception uses only the lower bound (a far median releases nothing);
+  - the STOP hold is accepted at 0.2 s at 10, 60 and 240 Hz;
   - partial-polyline geometry;
   - a person behind the robot;
-  - unlocated people;
   - a passage evaluated for a different width;
-  - monotonic timestamps;
-  - STOP hold counted in frames.
+  - monotonic timestamps.
 - Isolation checks:
   - `decision.py` and `footprint.py` import only the standard library;
-  - no Step 9 file imports a reference loader;
+  - no Step 9 file, including `person_box_depth.py`, imports a reference loader;
   - output files are written;
   - an existing run folder is never reused.
 
-Scenario run: `outputs/decisions_scenarios_20261015_214223` (commit `cc89948`). All 18 scenarios pass. Earlier
-scenario runs (`…_212507`, 16 scenarios, first version; `…_214114`, before the route-end fix) are superseded.
+Scenario run: `outputs/decisions_scenarios_20261015_220230` (commit `5ffd04e`). All 20 scenarios pass. Earlier
+scenario runs are superseded: `…_212507`, `…_214114`, `…_214223` and `…_220051`.
 
 ### Demo: replay with placeholder passage and gestures (not an evaluation)
 
 The demo replays the frozen Step 8 motion run on Office/dynamic/Capture_2 (adjustment split):
 `outputs/motion_1388f_20261013_223619`, config sha256 `15821ff9…1625`, checked by the script.
 - **People:** Step 8 motion output, a reference-depth and reference-camera-pose baseline.
+- **Lower bounds:** from `outputs/person_box_depth_511obs_20261015_220051`.
 - **Corridor:** the `proxy_route` centreline at the required 1.00 m.
-- **Robot position:** `camera_proxy`. The stop zone is 3.0 m.
+- **Robot position:** `camera_proxy`. The stop zone is 3.0 m and the caution distance 5.0 m.
 - **Passage:** a placeholder, "clear, 1.50 m". This is scripted, not measured.
 - **Gestures:** scripted. A MOVE runs from 0.5 s to the end; a second gesturer shows STOP from 12.0 to 13.0 s.
-- **Output:** `outputs/decisions_replay_1388f_20261015_214224` (commit `cc89948`), including `decision_timeline.png`.
+- **Output:** `outputs/decisions_replay_1388f_20261015_220231` (commit `5ffd04e`), including `decision_timeline.png`.
 - **Superseded runs:**
-  - `…_212508` (`60f6e1d`, first version, plot label cut off);
-  - `…_212612` (`c7a9835`, first version);
-  - `…_214115` (`2a9ed63`, route-end bug).
+  - `…_212508` and `…_212612` (first version);
+  - `…_214115` (route-end bug);
+  - `…_214224` (first review);
+  - `…_220052` (same decisions as `…_220231`, older reason text).
 
-| Decision | First version (`…_212612`) | Revised (`…_214224`) |
-|---|---|---|
-| STOP rule 1 person in stop zone | 237 (17.1%) | 185 (13.3%) |
-| STOP rule 2 entering stop zone | 64 (4.6%) | 64 (4.6%) |
-| STOP rule 3 STOP gesture | 89 (6.4%) | 89 (6.4%) |
-| STOP rule 4 movement unconfirmed | 154 (11.1%) | 191 (13.8%) |
-| MOVE rule 7 | 590 (42.5%) | 605 (43.6%) |
-| WAIT rule 8 (MOVE held / resume hold) | 254 (18.3%) | 254 (18.3%) |
+| Decision (of 1388 frames) | First version (`…_212612`) | First review (`…_214224`) | Second review (`…_220231`) |
+|---|---|---|---|
+| STOP rule 1 person in stop zone | 237 (17.1%) | 185 (13.3%) | 185 (13.3%) |
+| STOP rule 2 entering stop zone | 64 (4.6%) | 64 (4.6%) | 64 (4.6%) |
+| STOP rule 3 STOP gesture | 89 (6.4%) | 89 (6.4%) | 78 (5.6%) |
+| STOP rule 4 movement unconfirmed | 154 (11.1%) | 191 (13.8%) | 204 (14.7%) |
+| MOVE rule 7 | 590 (42.5%) | 605 (43.6%) | 592 (42.7%) |
+| WAIT rule 8 (MOVE held / resume hold) | 254 (18.3%) | 254 (18.3%) | 265 (19.1%) |
 
-What changed in the timeline (of 1388 frames):
-- **4.05 s:** track 380, 6.70 m ahead on the route, no longer causes STOP; it is beyond the stop zone.
-- **4.30 s:** STOP now starts with rule 4 for track 382, 0.05 m from the wider corridor's edge. It moves to rule 2
-  at 4.91 s and to rule 1 at 5.01 s.
-- **Later events are unchanged:** rule 2 then rule 4 for track 455 (8.1–10.2 s), the scripted STOP gesture
-  (12.0–13.5 s) and rule 4 for track 1440 at 21.6 s.
+What changed in the second review:
+- **4.08 s:** STOP starts with rule 4 for track 382, inside the corridor 3.41 m ahead (in the new caution band). In
+  the first review it started 0.2 s later, at 4.30 s.
+- **12.0 s:** the scripted STOP gesture is now accepted after 0.22 s (12.22 s) instead of 3 frames (12.03 s). The
+  WAIT in between comes from the rule that an unconfirmed STOP cancels every MOVE.
+- **Unchanged:** the later events, namely rule 2 then rule 4 for track 455 (8.1–10.2 s) and rule 4 for track
+  1440 at 21.6 s.
 
 None of this is a correctness measurement: there is no decision ground truth, and the passage and gestures are
 scripted.
@@ -1133,8 +1166,8 @@ scripted.
   and a replay with a placeholder passage and scripted gestures; they have not been evaluated. `camera_proxy` is
   not the robot position.
 - The load size is configured, not measured. The gesture module is not connected (no adapter yet).
-- Unlocated people are released from the caution zone on a median distance, which is not a lower bound (Step 9).
-- Portability is tested with synthetic run folders and on Windows. It has not yet been run on a real macOS
-  machine.
+- The unlocated-person lower bound is a box depth percentile (reference-depth baseline in THUD). The Unity
+  adapter must supply its own.
+- Code is kept macOS-compatible and checked by CI on macos-latest.
 - Semantic labels are used only as evaluation references, never as model input.
 - Real-scene (`Real_Scenes/store`) captures use a different layout and are not supported yet.

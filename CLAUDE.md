@@ -35,6 +35,9 @@
   `python -m unittest discover -s tests; if ($LASTEXITCODE -eq 0) { git commit ... }`
   (bash: `python -m unittest discover -s tests && git commit ...`;
   never pipe the test output through tail/grep before the check).
+- Code must stay macOS-compatible (checked by CI on macos-latest).
+  Manual macOS runs are not required; do not list them as a
+  limitation.
 - Finish every task with: exact commands for Windows PowerShell and
   macOS Terminal, output paths, checks completed, remaining
   limitations. Then stop and wait for review.
@@ -59,7 +62,10 @@
   the replay demo in 2a9ed63 and cc89948; configs/decision.json).
   Step 9 decisions use only motion_trusted (dynamic_classes:
   person), motion range 0-6 m, and stop for untrusted motion near
-  the route.
+  the route. Second review (2c4aad8, 5ffd04e): caution band,
+  lower-bound distance for unlocated people, stop_hold_s; proxy
+  routes regenerated at 1.00 m. Work continues on branch
+  feature/warehouse-robot.
 - Splits (enforced by data_splits.json and the guard): Office/dynamic
   Capture_1 development, Capture_2 adjustment (used), Captures 3-4
   final; Gym/dynamic Captures 2-6 cross-scene final; Gym Capture_1
@@ -69,8 +75,14 @@
     v^2 / (2 * decel) + buffer_m = 1.0*0.5 + 1.0 + 1.5 = 3.0 m
     (v, decel in robot.json; reaction_s, buffer_m in decision.json).
     Rule 1 applies only in the stop zone (corridor within
-    look-ahead); rule 2 predicts entry into it; caution_ahead_m >=
-    look_ahead_m.
+    look-ahead); rule 2 predicts entry into it.
+  - Caution distance (implemented): caution_ahead_m = stopping
+    distance + person_speed_mps * stopping time = 1.5 + 1.4 * 2.5 =
+    5.0 m (>= look_ahead_m).
+  - Unlocated person (implemented): released from the caution zone
+    only by a lower-bound distance (THUD: 5th percentile of valid
+    box depths); no valid depth -> caution zone.
+  - Gestures: STOP held stop_hold_s = 0.2 s, MOVE held 0.5 s.
   - Load (implemented): Euro pallet 1.20 x 0.80 m, 0.80 m side across
     travel, centred, "configured, not measured" (configs/load.json).
     Required width 1.00 m, computed only by footprint.py.

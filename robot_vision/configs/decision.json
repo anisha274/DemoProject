@@ -70,7 +70,7 @@
     "person_memory_s": "A tracked person whose position drops out (occlusion, invalid depth) keeps its latest valid position for 1 s. This equals resume_hold_s (1 s), so after a dropout nothing is released for at least memory + resume hold = 2 s.",
     "unlocated_person_in_caution_zone": "A person detected without a usable position counts as in the caution zone unless distance_lower_bound_m is beyond caution_ahead_m. In THUD the lower bound is the 5th percentile of valid planar depths in the person's box: background pixels can only raise percentiles above the person's own depth, so errors go in the safe direction; with camera pitch 0 the ground distance is at least the planar depth. No valid depth -> no lower bound -> caution zone.",
     "gesture_min_confidence": "Gesture-module outputs below this count as NONE. To be checked against the gesture module's own operating point when the adapter exists.",
-    "stop_hold_s": "Owner's decision: 0.2 s, frame-rate independent (3 frames was 0.05 s at 60 Hz but 0.3 s at 10 Hz). Rejects flicker; much shorter than move_hold_s.",
+    "stop_hold_s": "Owner's decision: 0.2 s, frame-rate independent (3 frames meant acceptance on the 3rd event: 0.03 s at 60 Hz but 0.2 s at 10 Hz). Rejects flicker; much shorter than move_hold_s.",
     "move_hold_s": "MOVE needs a deliberate gesture: longer than STOP because releasing the robot is the riskier direction.",
     "gesture_timeout_s": "A gesture not refreshed for 0.5 s is no longer being shown.",
     "resume_hold_s": "Asymmetric timing: STOP is immediate; MOVE (from any non-MOVE state, including the first start) needs the rule-7 conditions to hold continuously for 1 s."
