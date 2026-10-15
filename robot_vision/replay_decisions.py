@@ -36,7 +36,16 @@ def fnum(v):
         return None
 
 
-def load_persons(path: Path) -> dict[int, list[PersonState]]:
+def load_lower_bounds(path: Path | None) -> dict[tuple[int, int], float]:
+    """(step, track_id) -> box depth percentile from a person_box_depth.py run (lower bound on the distance)."""
+    if path is None:
+        return {}
+    with path.open(encoding="utf-8") as f:
+        return {(int(r["step"]), int(r["track_id"])): float(r["depth_percentile_m"])
+                for r in csv.DictReader(f) if r["depth_percentile_m"]}
+
+
+def load_persons(path: Path, lower: dict) -> dict[int, list[PersonState]]:
     """PersonState per step from motion_states.csv (rows detected or voted as person)."""
     by_step: dict[int, list[PersonState]] = {}
     with path.open(encoding="utf-8") as f:
@@ -50,7 +59,8 @@ def load_persons(path: Path) -> dict[int, list[PersonState]]:
             vx, vz = fnum(r["vel_x_mps"]), fnum(r["vel_z_mps"])
             by_step.setdefault(int(r["step"]), []).append(PersonState(
                 int(r["track_id"]), float(r["timestamp"]), pos, fnum(r["distance_m"]), r["motion_label"],
-                (vx, vz) if vx is not None and vz is not None else None, r["motion_trusted"] == "True"))
+                (vx, vz) if vx is not None and vz is not None else None, r["motion_trusted"] == "True",
+                lower.get((int(r["step"]), int(r["track_id"])))))
     return by_step
 
 
@@ -134,6 +144,8 @@ def main() -> None:
     p.add_argument("--motion-run", required=True)
     p.add_argument("--route-config", required=True)
     p.add_argument("--script", required=True, help="placeholder passage and scripted gestures")
+    p.add_argument("--person-depth-run", help="person_box_depth.py run: lower-bound distance of people "
+                                              "without a position (omitted: none, so they count as in the caution zone)")
     p.add_argument("--frozen-record", default="configs/motion_frozen.json")
     a = p.parse_args()
 
@@ -157,7 +169,14 @@ def main() -> None:
 
     fusion = rp.resolve(minfo["fusion_run"], rts)
     frames = [json.loads(l) for l in (fusion / "frames.jsonl").read_text(encoding="utf-8").splitlines() if l]
-    persons = load_persons(motion / "motion_states.csv")
+    depth_run = dio.resolve(a.person_depth_run) if a.person_depth_run else None
+    if depth_run is not None:
+        if not (depth_run / "COMPLETE").exists():
+            raise SystemExit(f"Person depth run is not complete: {depth_run}")
+        if dio.read_json(depth_run / "run_info.json")["motion_run"] != str(rp.relative_token(motion, rts)):
+            raise SystemExit("Person depth run was made from a different motion run")
+    persons = load_persons(motion / "motion_states.csv",
+                           load_lower_bounds(depth_run / "person_box_depth.csv" if depth_run else None))
     # only the proxy_route centreline is read; its width_m (robot-only proxy) is not used
     corridor = RouteCorridor(tuple(tuple(q) for q in route_cfg["centreline_xz_m"]), req["required_width_m"],
                              route_cfg["label"])
@@ -184,6 +203,7 @@ def main() -> None:
         "route_config_note": "only the proxy_route centreline is read; its width_m and the Step 8 route fields "
                              "in motion_states.csv are proxies and are not read by decisions",
         "motion_run": str(motion), "motion_config_sha256": minfo["config_sha256"], "capture": minfo["capture"],
+        "person_depth_run": str(depth_run) if depth_run else None,
         "split_of_this_capture": split, "fusion_run_frames": str(fusion / "frames.jsonl"),
         "frames": len(frames), "person_rows": sum(len(v) for v in persons.values()),
         "decision_config": cfg, "replay_script": script})

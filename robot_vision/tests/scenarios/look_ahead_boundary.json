@@ -1,16 +1,16 @@
 {
  "name": "look_ahead_boundary",
- "description": "Stop zone = corridor within look_ahead_m (3.0 m). Trusted stationary person in the corridor at 3.1 m: not STOP. Untrusted person at 2.9 m: STOP rule 1. With caution_ahead_m = look_ahead_m, an untrusted person in the corridor at 3.1 m is in neither zone: MOVE (documents the declared values).",
+ "description": "Stop zone = corridor within look_ahead_m (3.0 m). Trusted stationary person in the corridor at 3.1 m: not STOP. Untrusted person at 2.9 m: STOP rule 1. Untrusted person in the corridor at 3.1 m: outside the stop zone but in the caution band (to 5 m): STOP rule 4.",
  "config_assumptions": {
   "move_hold_s": 0.5,
   "resume_hold_s": 1.0,
   "gesture_timeout_s": 0.5,
-  "stop_hold_frames": 3,
+  "stop_hold_s": 0.2,
   "gesture_min_confidence": 0.6,
   "required_width_m": 1.0,
   "look_ahead_m": 3.0,
   "caution_lateral_m": 1.0,
-  "caution_ahead_m": 3.0,
+  "caution_ahead_m": 5.0,
   "entry_horizon_s": 3.0,
   "motion_range_m": 6.0,
   "person_memory_s": 1.0
@@ -136,9 +136,18 @@
   },
   {
    "from_t": 4.0,
-   "to_t": 99,
+   "to_t": 5.0,
    "decision": "MOVE",
    "rule": 7
+  },
+  {
+   "from_t": 5.0,
+   "to_t": 99,
+   "decision": "STOP",
+   "rule": 4,
+   "track_ids": [
+    20
+   ]
   }
  ]
 }

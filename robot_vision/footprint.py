@@ -11,6 +11,9 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 LOOK_AHEAD_FORMULA = "look_ahead_m = v * reaction_s + v^2 / (2 * decel) + buffer_m"
+CAUTION_AHEAD_FORMULA = ("caution_ahead_m = stopping_distance + person_speed_mps * stopping_time, "
+                         "stopping_distance = v * reaction_s + v^2 / (2 * decel), "
+                         "stopping_time = reaction_s + v / decel")
 
 
 def _resolve(p: str | Path) -> Path:
@@ -58,3 +61,19 @@ def look_ahead(robot: dict, la: dict) -> dict:
             "reaction_s": la["reaction_s"], "buffer_m": la["buffer_m"],
             "reaction_distance_m": round(v * la["reaction_s"], 6), "braking_distance_m": round(v * v / (2 * decel), 6),
             "look_ahead_m": value}
+
+
+def caution_ahead(robot: dict, la: dict, ca: dict) -> dict:
+    """Caution distance: how far a walking person can come while the robot stops. Uses reaction_s from the
+    look-ahead block and v, decel from robot.json. Refuses a declared caution_ahead_m that no longer matches."""
+    v, decel, reaction = robot["max_speed_mps"], robot["decel_mps2"], la["reaction_s"]
+    stop_dist = v * reaction + v * v / (2 * decel)
+    stop_time = reaction + v / decel
+    value = round(stop_dist + ca["person_speed_mps"] * stop_time, 6)
+    declared = ca.get("caution_ahead_m")
+    if declared is not None and abs(declared - value) > 1e-6:
+        raise ValueError(f"declared caution_ahead_m {declared} != {value} from {CAUTION_AHEAD_FORMULA} "
+                         f"(v={v}, decel={decel}, reaction_s={reaction}, person_speed_mps={ca['person_speed_mps']})")
+    return {"formula": CAUTION_AHEAD_FORMULA, "stopping_distance_m": round(stop_dist, 6),
+            "stopping_time_s": round(stop_time, 6), "person_speed_mps": ca["person_speed_mps"],
+            "caution_ahead_m": value}

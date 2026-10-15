@@ -13,7 +13,8 @@ Scenario files (tests/scenarios/*.json) are plain JSON so the same cases can be 
      "time": {"start_s", "end_s", "dt_s"},          frames at start_s + k*dt_s up to end_s
      "robot_xz": [x, z] | null,
      "persons":  [{"track_id", "from_t", "to_t", "position_xz" | null, "velocity_xz" | null, "advance": bool,
-                   "distance_m" (optional; default = distance to robot_xz), "motion_label", "motion_trusted"}],
+                   "distance_m" (optional; default = distance to robot_xz), "distance_lower_bound_m" (optional),
+                   "motion_label", "motion_trusted"}],
      "passage":  [{"from_t", "to_t", "status", "available_width_m"}],   not covered -> not_evaluated
      "gestures": [{"from_t", "to_t", "track_id", "gesture", "confidence"}],  one event per frame
      "expect":   [{"from_t", "to_t", "decision", "rule", "track_ids" (optional), "reason_contains" (optional)}]}
@@ -57,9 +58,11 @@ def load_decision_config(path: str | Path = DEFAULT_CONFIG) -> tuple[dict, dict,
     cfg = read_json(path)
     foot = fp.load_footprint(resolve(cfg["paths"]["robot_config"]))
     la = fp.look_ahead(foot["robot"], cfg["look_ahead"])
-    if cfg["caution_ahead_m"] < la["look_ahead_m"] - EPS:
-        raise ValueError(f"caution_ahead_m {cfg['caution_ahead_m']} < look_ahead_m {la['look_ahead_m']}")
-    cfg = {**cfg, "look_ahead": {**cfg["look_ahead"], **la}}
+    ca = fp.caution_ahead(foot["robot"], cfg["look_ahead"], cfg["caution_ahead"])
+    if ca["caution_ahead_m"] < la["look_ahead_m"] - EPS:
+        raise ValueError(f"caution_ahead_m {ca['caution_ahead_m']} < look_ahead_m {la['look_ahead_m']}")
+    cfg = {**cfg, "look_ahead": {**cfg["look_ahead"], **la}, "caution_ahead": {**cfg["caution_ahead"], **ca},
+           "caution_ahead_m": ca["caution_ahead_m"]}
     return cfg, foot["robot"], foot["load"], foot
 
 
@@ -118,7 +121,7 @@ class ScriptedPersons:
                 dist = math.hypot(pos[0] - self.robot[0], pos[1] - self.robot[1])
             out.append(PersonState(s["track_id"], t, tuple(pos) if pos is not None else None, dist,
                                    s.get("motion_label", "unknown"), tuple(vel) if vel is not None else None,
-                                   bool(s.get("motion_trusted", False))))
+                                   bool(s.get("motion_trusted", False)), s.get("distance_lower_bound_m")))
         return out
 
 

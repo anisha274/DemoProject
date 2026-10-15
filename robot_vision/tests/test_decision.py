@@ -26,8 +26,8 @@ CORRIDOR = dec.RouteCorridor(((0.0, 0.0), (0.0, 20.0)), REQ)
 CLEAR = dec.PassageState("clear", 1.5, REQ)
 
 
-def person(tid, pos, dist=None, label="unknown", vel=None, trusted=False, t=0.0):
-    return dec.PersonState(tid, t, pos, dist, label, vel, trusted)
+def person(tid, pos, dist=None, label="unknown", vel=None, trusted=False, t=0.0, lower=None):
+    return dec.PersonState(tid, t, pos, dist, label, vel, trusted, lower)
 
 
 class ScenarioTests(unittest.TestCase):
@@ -40,7 +40,7 @@ class ScenarioTests(unittest.TestCase):
         for need in [f"rule{i}_" for i in range(1, 9)] + [
                 "conflict_stop_vs_move", "conflict_person_in_route_with_move", "conflict_narrow_passage_with_move",
                 "gesture_timeout", "asymmetric_timing", "unknown_motion", "beyond_motion_range",
-                "look_ahead_boundary", "head_on_approach"]:
+                "look_ahead_boundary", "head_on_approach", "caution_band", "unlocated_person"]:
             self.assertTrue(any(n.startswith(need) for n in names), need)
 
     def test_scenarios(self):
@@ -118,6 +118,28 @@ class LookAheadTests(unittest.TestCase):
         self.assertAlmostEqual(self.L, 3.0)
         with self.assertRaises(ValueError):  # declared value no longer matches its inputs
             fp.look_ahead({**ROBOT, "max_speed_mps": 1.5}, {"reaction_s": 0.5, "buffer_m": 1.5, "look_ahead_m": 3.0})
+
+    def test_caution_formula(self):
+        ca = fp.caution_ahead(ROBOT, {"reaction_s": 0.5}, {"person_speed_mps": 1.4})
+        self.assertAlmostEqual(ca["stopping_distance_m"], 1.5)
+        self.assertAlmostEqual(ca["stopping_time_s"], 2.5)
+        self.assertAlmostEqual(ca["caution_ahead_m"], 1.5 + 1.4 * 2.5)
+        self.assertAlmostEqual(self.cfg["caution_ahead_m"], 5.0)
+        with self.assertRaises(ValueError):  # stale declared value
+            fp.caution_ahead({**ROBOT, "decel_mps2": 1.0}, {"reaction_s": 0.5},
+                             {"person_speed_mps": 1.4, "caution_ahead_m": 5.0})
+
+    def _one(self, pos, trusted):
+        p = person(1, pos, pos[1], "stationary" if trusted else "unknown", (0.0, 0.0) if trusted else None, trusted)
+        return self.engine().step(dec.DecisionFrame(0.0, (p,), CLEAR, (), (0.0, 0.0)))
+
+    def test_caution_band_in_corridor(self):
+        d = self._one((0.0, 4.5), trusted=False)
+        self.assertEqual((d.decision, d.rule), ("STOP", 4))
+        d = self._one((0.0, 4.5), trusted=True)
+        self.assertNotEqual(d.decision, "STOP")
+        d = self._one((0.0, 5.5), trusted=False)
+        self.assertNotEqual(d.decision, "STOP")
 
     def test_caution_ahead_must_cover_look_ahead(self):
         self.assertGreaterEqual(self.cfg["caution_ahead_m"], self.L)
@@ -201,14 +223,18 @@ class GeometryAndEdgeCaseTests(unittest.TestCase):
         d = e.step(dec.DecisionFrame(0.1, (person(1, (0.0, 7.0), 2.0),), CLEAR, (), (0.0, 5.0)))
         self.assertEqual((d.decision, d.rule), ("STOP", 1))
 
-    def test_unlocated_person(self):
+    def test_unlocated_person_uses_only_the_lower_bound(self):
         e = self.engine()
-        d = e.step(dec.DecisionFrame(0.0, (person(1, None, 2.0),), CLEAR, (), (0.0, 0.0)))
+        ca = self.cfg["caution_ahead_m"]
+        d = e.step(dec.DecisionFrame(0.0, (person(1, None, 2.0, lower=2.0),), CLEAR, (), (0.0, 0.0)))
         self.assertEqual((d.decision, d.rule), ("STOP", 4))
-        self.assertIn("position unknown", d.reason)
-        d = e.step(dec.DecisionFrame(0.1, (person(2, None, 8.0),), CLEAR, (), (0.0, 0.0)))
+        self.assertIn("position unknown, at least 2.00 m away", d.reason)
+        d = e.step(dec.DecisionFrame(0.1, (person(2, None, 8.0, lower=ca + 0.5),), CLEAR, (), (0.0, 0.0)))
         self.assertEqual((d.decision, d.rule), ("WAIT", 8))
-        d = e.step(dec.DecisionFrame(0.2, (person(3, None, None),), CLEAR, (), (0.0, 0.0)))
+        # a far median distance without a lower bound releases nothing
+        d = e.step(dec.DecisionFrame(0.2, (person(3, None, 8.0),), CLEAR, (), (0.0, 0.0)))
+        self.assertEqual((d.decision, d.rule), ("STOP", 4))
+        d = e.step(dec.DecisionFrame(0.3, (person(4, None, None),), CLEAR, (), (0.0, 0.0)))
         self.assertEqual((d.decision, d.rule), ("STOP", 4))
 
     def test_corridor_width_must_be_the_required_width(self):
@@ -235,11 +261,18 @@ class GeometryAndEdgeCaseTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             dec.GestureEvent(0.0, 1, "WAVE", 1.0)
 
-    def test_stop_hold_counts_frames_not_time(self):
-        e = self.engine()
-        for t in [0.0, 0.01, 0.02]:
-            d = e.step(dec.DecisionFrame(t, (), CLEAR, (dec.GestureEvent(t, 1, "STOP", 0.9),)))
-        self.assertEqual((d.decision, d.rule), ("STOP", 3))
+    def test_stop_hold_is_time_not_frames(self):
+        hold = self.cfg["stop_hold_s"]
+        for hz in (10, 60, 240):
+            e, accepted = self.engine(), None
+            for k in range(int(hz * 0.5)):
+                t = k / hz
+                d = e.step(dec.DecisionFrame(t, (), CLEAR, (dec.GestureEvent(t, 1, "STOP", 0.9),)))
+                if d.decision == "STOP" and accepted is None:
+                    accepted = t
+                    self.assertEqual(d.rule, 3)
+            self.assertAlmostEqual(accepted, hold, delta=1 / hz + 1e-9, msg=f"{hz} Hz")
+            self.assertGreaterEqual(accepted, hold - 1e-9)
 
 
 class IsolationAndOutputTests(unittest.TestCase):
@@ -255,7 +288,8 @@ class IsolationAndOutputTests(unittest.TestCase):
 
     def test_no_reference_loaders_imported(self):
         banned = {"thud_data", "fuse_objects", "estimate_motion", "validate_depth", "report_motion", "report_step4"}
-        for f in ["decision.py", "decision_io.py", "footprint.py", "run_decisions.py", "replay_decisions.py"]:
+        for f in ["decision.py", "decision_io.py", "footprint.py", "run_decisions.py", "replay_decisions.py",
+                  "person_box_depth.py"]:
             p = ROOT / f
             if not p.exists():
                 continue

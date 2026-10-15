@@ -50,7 +50,10 @@ RULE_NAMES = {
 
 @dataclass(frozen=True)
 class PersonState:
-    """One tracked person at one timestamp. position_xz / velocity_xz are ground-plane (x, z) or None."""
+    """One tracked person at one timestamp. position_xz / velocity_xz are ground-plane (x, z) or None.
+    distance_m: ground distance from the robot (used for motion_range_m). distance_lower_bound_m: a distance the
+    person is known to be at least as far as (errors must be on the near side); used only for a person without a
+    position. None -> no lower bound, so an unlocated person counts as in the caution zone."""
     track_id: int | str
     timestamp: float
     position_xz: tuple[float, float] | None
@@ -58,6 +61,7 @@ class PersonState:
     motion_label: str
     velocity_xz: tuple[float, float] | None
     motion_trusted: bool
+    distance_lower_bound_m: float | None = None
 
 
 @dataclass(frozen=True)
@@ -200,13 +204,14 @@ class Polyline:
 # ---------------------------------------------------------------- gestures
 
 class GestureFilter:
-    """Per-track gesture state. A STOP is accepted after stop_hold_frames consecutive valid STOP events, a MOVE
-    after it has been held for move_hold_s; an event older than gesture_timeout_s counts as NONE, and an event
-    below min_confidence counts as NONE."""
+    """Per-track gesture state. A STOP is accepted once held for stop_hold_s, a MOVE once held for move_hold_s
+    (both in seconds, independent of the frame rate); an event older than gesture_timeout_s counts as NONE, and
+    an event below min_confidence counts as NONE. A gesture is held while its events keep arriving no more than
+    gesture_timeout_s apart."""
 
     def __init__(self, cfg: dict):
         self.min_conf = cfg["gesture_min_confidence"]
-        self.stop_frames = cfg["stop_hold_frames"]
+        self.stop_hold = cfg["stop_hold_s"]
         self.move_hold = cfg["move_hold_s"]
         self.timeout = cfg["gesture_timeout_s"]
         self.tracks: dict = {}
@@ -216,13 +221,13 @@ class GestureFilter:
             if e.timestamp > t + EPS:
                 raise ValueError(f"gesture event at {e.timestamp} is later than the decision time {t}")
             st = self.tracks.setdefault(e.track_id, {"last_t": None, "gesture": "NONE", "confidence": 0.0,
-                                                     "stop_streak": 0, "move_since": None})
+                                                     "stop_since": None, "move_since": None})
             if st["last_t"] is not None and e.timestamp <= st["last_t"] + EPS:
                 continue  # already seen
             g = e.gesture if e.confidence >= self.min_conf else "NONE"
             fresh = st["last_t"] is not None and e.timestamp - st["last_t"] <= self.timeout + EPS
             prev = st["gesture"] if fresh else "NONE"
-            st["stop_streak"] = (st["stop_streak"] if prev == "STOP" else 0) + 1 if g == "STOP" else 0
+            st["stop_since"] = (st["stop_since"] if prev == "STOP" else e.timestamp) if g == "STOP" else None
             st["move_since"] = (st["move_since"] if prev == "MOVE" else e.timestamp) if g == "MOVE" else None
             st.update(last_t=e.timestamp, gesture=g, confidence=e.confidence)
 
@@ -232,10 +237,11 @@ class GestureFilter:
             age = t - st["last_t"]
             g = st["gesture"] if age <= self.timeout + EPS else "NONE"
             held = t - st["move_since"] if g == "MOVE" else 0.0
+            stop_held = t - st["stop_since"] if g == "STOP" else 0.0
             out.append({"track_id": tid, "gesture": g, "last_event_gesture": st["gesture"],
                         "confidence": st["confidence"], "age_s": round(age, 4),
-                        "stop_frames": st["stop_streak"] if g == "STOP" else 0,
-                        "stop_accepted": g == "STOP" and st["stop_streak"] >= self.stop_frames,
+                        "stop_held_s": round(stop_held, 4),
+                        "stop_accepted": g == "STOP" and stop_held >= self.stop_hold - EPS,
                         "move_held_s": round(held, 4), "move_accepted": g == "MOVE" and held >= self.move_hold - EPS})
         return out
 
@@ -330,8 +336,10 @@ class DecisionEngine:
                         a["gap_to_stop_zone_m"] = round(gap, 4)
                         a["closing_speed_mps"] = round(gap / a["entry_in_s"], 4)
         elif p is not None and self.cfg["unlocated_person_in_caution_zone"]:
-            # detected but not locatable: inside the caution zone unless it is known to be farther away
-            a["in_caution_zone"] = p.distance_m is None or p.distance_m <= self.cfg["caution_ahead_m"] + EPS
+            # detected but not locatable: inside the caution zone unless a lower bound puts it farther away
+            lb = p.distance_lower_bound_m
+            a["distance_lower_bound_m"] = lb
+            a["in_caution_zone"] = lb is None or lb <= self.cfg["caution_ahead_m"] + EPS
             a["unlocated"] = True
         return a
 
@@ -406,12 +414,12 @@ class DecisionEngine:
                 f"closing at {a['closing_speed_mps']:.2f} m/s" for a in r2), ids(r2))
         elif stops:
             out = ("STOP", 3, "STOP gesture: " + "; ".join(
-                f"track {g['track_id']} (confidence {g['confidence']:.2f}, {g['stop_frames']} frames)" for g in stops),
+                f"track {g['track_id']} (confidence {g['confidence']:.2f}, held {g['stop_held_s']:.2f} s)" for g in stops),
                 ids(stops))
         elif r4:
             def where(a):
                 if a.get("unlocated"):
-                    return f"position unknown, distance {_f2(a['distance_m'])} m"
+                    return f"position unknown, at least {_f2(a['distance_lower_bound_m'])} m away"
                 return f"{a['dist_to_corridor_edge_m']:.2f} m from corridor edge, {a['ahead_m']:.2f} m ahead"
             out = ("STOP", 4, "cannot confirm person's movement: " + "; ".join(
                 f"track {a['track_id']} in caution zone ({where(a)}), motion {a['motion_status']}" for a in r4), ids(r4))
