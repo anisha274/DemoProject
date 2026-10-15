@@ -143,6 +143,14 @@ class LookAheadTests(unittest.TestCase):
         self.assertFalse(e._in_stop_zone((0.0, self.L + half * 0.8), 0.0)[0])
         self.assertTrue(e._in_stop_zone((half * 0.9, self.L - 0.01), 0.0)[0])
 
+    def test_route_end_is_not_cut_flat(self):
+        # route ends 0.8 m ahead of the robot, before the look-ahead: the zones keep a round end there
+        e = dec.DecisionEngine(self.cfg, self.req, dec.RouteCorridor(((0.0, 0.0), (0.0, 0.8)), REQ))
+        half = self.req["required_width_m"] / 2
+        self.assertTrue(e._in_stop_zone((0.0, 0.8 + half * 0.8), 0.0)[0])
+        d = e.step(dec.DecisionFrame(0.0, (person(1, (0.6, 1.0), 1.2),), CLEAR, (), (0.0, 0.0)))
+        self.assertEqual((d.decision, d.rule), ("STOP", 4))  # untrusted, just past the route end, beside it
+
     def test_head_on_approach_from_5_m_stops_before_stop_zone(self):
         e = self.engine()
         first_stop = None

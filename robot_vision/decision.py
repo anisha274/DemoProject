@@ -172,11 +172,13 @@ class Polyline:
     def zone(self, p, s0: float, s1: float, half: float) -> tuple[bool, float, float]:
         """Band of half-width `half` around the line between arc lengths s0 and s1, with a flat far end at s1
         (round at s0, which covers the robot body). Returns (inside, distance to the centre-line portion,
-        arc length of the nearest point); a point past the flat end is outside whatever its distance."""
+        arc length of the nearest point); a point past the flat end is outside whatever its distance.
+        Where the route itself ends before s1, the end stays round: the robot and its load reach past the last
+        centre-line point, so nothing there is cut off."""
         d, s = self.nearest(p, s0, s1)
         if d > half + EPS:
             return False, d, s
-        if s >= min(s1, self.length) - EPS:
+        if s1 < self.length - EPS and s >= s1 - EPS:
             e, t = self.point_and_tangent(s1)
             if (p[0] - e[0]) * t[0] + (p[1] - e[1]) * t[1] > EPS:
                 return False, d, s
@@ -189,7 +191,7 @@ class Polyline:
             return 0.0
         e, t = self.point_and_tangent(s1)
         along = (p[0] - e[0]) * t[0] + (p[1] - e[1]) * t[1]
-        if s >= min(s1, self.length) - EPS and along > EPS:
+        if s1 < self.length - EPS and s >= s1 - EPS and along > EPS:
             across = abs(-(p[0] - e[0]) * t[1] + (p[1] - e[1]) * t[0])
             return math.hypot(along, max(0.0, across - half))
         return max(0.0, d - half)
