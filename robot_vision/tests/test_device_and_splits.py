@@ -55,16 +55,37 @@ class SplitGuardTests(unittest.TestCase):
         self.assertEqual(ds.split_of("Synthetic_Scenes/Office/dynamic/Capture_2", self.splits), "adjustment")
         self.assertEqual(ds.split_of("Synthetic_Scenes/Office/dynamic/Capture_4", self.splits), "final_evaluation")
         self.assertEqual(ds.split_of("Synthetic_Scenes/Gym/dynamic/Capture_5", self.splits), "cross_scene_final_evaluation")
+        self.assertEqual(ds.split_of("Synthetic_Scenes/Gym/dynamic/Capture_1", self.splits), "excluded")
         self.assertIsNone(ds.split_of("Synthetic_Scenes/Gym/static/Capture_1", self.splits))
 
     def test_guard(self):
-        for key in ("Synthetic_Scenes/Office/dynamic/Capture_3", "Synthetic_Scenes/Gym/dynamic/Capture_1"):
+        for key in ("Synthetic_Scenes/Office/dynamic/Capture_3", "Synthetic_Scenes/Gym/dynamic/Capture_2"):
             with self.assertRaises(SystemExit):
                 ds.guard(key, False, self.splits)
             self.assertIn(ds.guard(key, True, self.splits), self.splits["final_evaluation_splits"])
         self.assertEqual(ds.guard("Synthetic_Scenes/Office/dynamic/Capture_2", False, self.splits), "adjustment")
         with self.assertRaises(SystemExit):  # the flag is only for final-evaluation captures
             ds.guard("Synthetic_Scenes/Office/dynamic/Capture_2", True, self.splits)
+
+    def test_exclusion_wins_in_either_entry_order(self):
+        gym1, wild = "Synthetic_Scenes/Gym/dynamic/Capture_1", "Synthetic_Scenes/Gym/dynamic/*"
+        orders = {"exclusion before wildcard": [(gym1, "excluded"), (wild, "cross_scene_final_evaluation")],
+                  "exclusion after wildcard": [(wild, "cross_scene_final_evaluation"), (gym1, "excluded")],
+                  "excluded by pattern": [(wild, "cross_scene_final_evaluation"), ("*/Gym/dynamic/Capture_1", "excluded")]}
+        for name, entries in orders.items():
+            splits = {**self.splits, "captures": dict(entries)}
+            with self.subTest(name):
+                self.assertEqual(ds.split_of(gym1, splits), "excluded")
+                for flag in (False, True):  # refused with and without --final-evaluation
+                    with self.assertRaises(SystemExit):
+                        ds.guard(gym1, flag, splits)
+                self.assertEqual(ds.guard("Synthetic_Scenes/Gym/dynamic/Capture_2", True, splits),
+                                 "cross_scene_final_evaluation")
+
+    def test_repo_config_refuses_gym_capture_1(self):
+        for flag in (False, True):
+            with self.assertRaises(SystemExit):
+                ds.guard("Synthetic_Scenes/Gym/dynamic/Capture_1", flag, self.splits)
 
     def test_capture_key(self):
         self.assertEqual(ds.capture_key(Path("/data/RGB-D/Synthetic_Scenes/Gym/dynamic/Capture_2"), Path("/data/RGB-D")),

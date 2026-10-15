@@ -11,7 +11,9 @@ Evidence used (no depth assumption is made in advance):
 
 Usage:
     python validate_depth.py --fit-capture Synthetic_Scenes/Office/dynamic/Capture_1 ^
-        --test-captures Synthetic_Scenes/Office/dynamic/Capture_2 Synthetic_Scenes/Gym/dynamic/Capture_1
+        --test-captures Synthetic_Scenes/Office/dynamic/Capture_2 Synthetic_Scenes/Office/static/Capture_1
+    (The recorded Stage 3 run also tested Synthetic_Scenes/Gym/dynamic/Capture_1; that capture is now excluded
+    and the split guard refuses it.)
 """
 
 from __future__ import annotations
@@ -276,8 +278,8 @@ def main() -> None:
                         help="Used for dataset_root and output_root")
     parser.add_argument("--dataset-root")
     parser.add_argument("--fit-capture", default="Synthetic_Scenes/Office/dynamic/Capture_1")
-    # Gym/dynamic/Capture_1 was a test capture in the recorded Stage 3 run; it is now in the cross-scene
-    # final-evaluation split, so it is no longer a default.
+    # Gym/dynamic/Capture_1 was a test capture in the recorded Stage 3 run; it is now excluded from every
+    # evaluation split (data_splits.json), so it is no longer a default and the guard refuses it.
     parser.add_argument("--test-captures", nargs="*", default=[
         "Synthetic_Scenes/Office/dynamic/Capture_2", "Synthetic_Scenes/Office/static/Capture_1",
         "Synthetic_Scenes/Gym/static/Capture_1"])

@@ -30,7 +30,7 @@ The teammate's gesture code lives in a separate repository
 | `configs/robot.json` | Provisional robot width (0.60 m) and safety margin per side (0.10 m); load dimensions to come from Unity. |
 | `tests/test_fuse_objects.py` | Unit tests for the pose convention, pixel selection and point-to-box distance. |
 | `report_step4.py` | Step 4 report supplement: calibration used, fitted parameters, all-class table, unmatched-couch classification, timing and step sizes. Reads a fusion run; never modifies it. |
-| `configs/data_splits.json` | Office/dynamic split: Capture_1 development, Capture_2 adjustment, Capture_3/4 final evaluation only. |
+| `configs/data_splits.json` | Splits: Office/dynamic Capture_1 development, Capture_2 adjustment, Capture_3/4 final evaluation only; Gym/dynamic Captures 2–6 cross-scene final evaluation; Gym/dynamic Capture_1 excluded. |
 | `motion.py` | Step 8 building blocks: observation quality, track resets, trailing-window velocity, labels with hysteresis, route geometry. |
 | `estimate_motion.py` | Step 8: world and relative motion per tracked observation from a fusion run, proxy-route time-to-route, evaluation, plots. |
 | `make_proxy_route.py` | Writes an explicit corridor config from the recorded camera path, with width from `robot.json`. |
@@ -343,16 +343,20 @@ Recorded in `configs/data_splits.json` and copied into every report:
 | Office/dynamic/Capture_1 | development | Stages 1–4, Step 8; Stage 3 depth/FOV fit |
 | Office/dynamic/Capture_2 | adjustment: the only capture on which a parameter may be adjusted | Stage 3 held-out depth test; Step 8 v2 development (one full inference run) |
 | Office/dynamic/Capture_3, Capture_4 | final evaluation: one run with a frozen config | not used |
-| Gym/dynamic, all captures (1–6) | cross-scene final evaluation: untouched cross-scene test | Capture_1 only: Stage 3 held-out depth test (reference masks vs reference 3D boxes; no model, fusion or motion output) |
+| Gym/dynamic/Capture_2 – Capture_6 | cross-scene final evaluation: untouched cross-scene test | not used |
+| Gym/dynamic/Capture_1 | excluded: not used for any evaluation | Stage 3 held-out depth test (reference masks vs reference 3D boxes; no model, fusion or motion output) |
 
 The Gym/dynamic split was recorded on 2026-10-13, before any use of Capture_2 and before the motion config
-was frozen.
+was frozen. Gym/dynamic/Capture_1 was excluded on 2026-10-15, before any final evaluation, because its
+Stage 3 use means it is not an untouched test capture.
 
 **Guard.** `data_splits.guard()` runs in every script that reads a capture: `audit_dataset.py`,
 `check_camera_streams.py`, `validate_depth.py`, `run_segmentation.py`, `track_objects.py`, `fuse_objects.py`
 and `estimate_motion.py`.
 - It refuses a final-evaluation capture unless `--final-evaluation` is passed, and refuses that flag on any
   other capture.
+- It always refuses an excluded capture, even with `--final-evaluation`. Exclusions are checked first, so they
+  win over a matching wildcard whatever the entry order in `data_splits.json`.
 - `estimate_motion.py --final-evaluation` also requires the frozen motion config; see Step 8 v2.
 - `validate_depth.py` no longer tests Gym/dynamic/Capture_1 by default. The recorded Stage 3 run did test it,
   before the split was declared.
