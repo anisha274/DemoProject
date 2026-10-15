@@ -990,6 +990,43 @@ Each run writes a new folder; existing folders are never overwritten.
   - output files are written;
   - an existing run folder is never reused.
 
+Scenario run: `outputs/decisions_scenarios_20261015_212507`. All 16 scenarios pass (`summary.json`).
+
+### Demo: replay with placeholder passage and gestures (not an evaluation)
+
+The demo replays the frozen Step 8 motion run on Office/dynamic/Capture_2 (adjustment split):
+`outputs/motion_1388f_20261013_223619`, config sha256 `15821ff9…1625`, checked by the script.
+- **People:** Step 8 motion output, a reference-depth and reference-camera-pose baseline.
+- **Corridor:** `proxy_route`, widened from 0.80 m to the required 0.90 m.
+- **Robot position:** `camera_proxy`.
+- **Passage:** a placeholder, "clear, 1.50 m". This is scripted, not measured.
+- **Gestures:** scripted. A MOVE runs from 0.5 s to the end; a second gesturer shows STOP from 12.0 to 13.0 s.
+- **Output:** `outputs/decisions_replay_1388f_20261015_212612` (commit `c7a9835`), including `decision_timeline.png`.
+  - An earlier run, `outputs/decisions_replay_1388f_20261015_212508` (commit `60f6e1d`), is superseded. Its
+    decisions are identical, but the plot cut off part of the label line.
+
+| Decision | Frames (of 1388) |
+|---|---|
+| STOP rule 1 person in route | 237 (17.1%) |
+| STOP rule 2 person entering | 64 (4.6%) |
+| STOP rule 3 STOP gesture | 89 (6.4%) |
+| STOP rule 4 movement unconfirmed | 154 (11.1%) |
+| MOVE rule 7 | 590 (42.5%) |
+| WAIT rule 8 (MOVE held / resume hold) | 254 (18.3%) |
+
+What the timeline shows:
+- **0–2.0 s:** WAIT while the MOVE gesture and the resume hold run.
+- **4.05 s:** STOP rule 1 for track 380, 6.70 m ahead on the route.
+- **8.1 s:** rule 2 for track 455 (enters in 0.80 s).
+- **9.0 s:** rule 4 once track 455's motion is untrusted. The person memory keeps it to 10.2 s.
+- **10.2–11.25 s:** resume hold, then MOVE.
+- **12.0 s:** WAIT for one frame while the unconfirmed STOP cancels the MOVE, then STOP rule 3 until the gesture
+  times out (13.5 s).
+- **21.6 s:** rule 4 for an untrusted person 0.30 m from the corridor edge.
+
+None of this is a correctness measurement: there is no decision ground truth, and the passage and gestures are
+scripted.
+
 ## Known limitations
 
 - Depth decoding is validated only for the THUD **synthetic** captures above. Real-scene depth and any
