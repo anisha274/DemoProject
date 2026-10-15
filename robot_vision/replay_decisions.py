@@ -189,8 +189,7 @@ def main() -> None:
     dio.write_json(out / "run_info.json", info)
     dio.write_decisions(out, decisions, {"labels": labels, "git": info["git"], "required_width": req})
     note = (f"{minfo['capture']} ({split} split) | people: frozen Step 8 motion, reference-depth and "
-            f"reference-camera-pose baseline
-corridor: proxy_route, {engine.corridor_width_m:.2f} m | robot: "
+            f"reference-camera-pose baseline\ncorridor: proxy_route, {engine.corridor_width_m:.2f} m | robot: "
             f"camera_proxy | passage and gestures: scripted placeholders | load: {load['label']}")
     plot(decisions, out / "decision_timeline.png", note)
     dio.mark_complete(out)
