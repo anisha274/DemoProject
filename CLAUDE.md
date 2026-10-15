@@ -14,8 +14,8 @@
   outputs store paths relative to configured roots.
 - Never copy datasets into the repo. Datasets, model weights, outputs
   and CLAUDE.local.md stay git-ignored.
-- Do not modify my friend's gesture module (folder: <FILL IN PATH>).
-  Connect to it only through an adapter.
+- Do not modify my friend's gesture module (git submodule at
+  external/media_pipe_gesture). Connect to it only through an adapter.
 - Do not rerun successful inference. Never overwrite existing output
   folders; each run writes a new timestamped folder under outputs/.
 - Reference (ground-truth) data is read only by evaluation code.
@@ -29,6 +29,12 @@
   "reference-camera-pose baseline", "camera_proxy", "proxy_route".
 - Save the exact config and git commit hash in every output folder.
 - Commit locally at checkpoints. Never push.
+- Commit only after the full test suite passes, and check the exit
+  status before committing. Windows PowerShell 5.1 has no '&&' and
+  continues after ';', so use e.g.
+  `python -m unittest discover -s tests; if ($LASTEXITCODE -eq 0) { git commit ... }`
+  (bash: `python -m unittest discover -s tests && git commit ...`;
+  never pipe the test output through tail/grep before the check).
 - Finish every task with: exact commands for Windows PowerShell and
   macOS Terminal, output paths, checks completed, remaining
   limitations. Then stop and wait for review.
@@ -49,19 +55,30 @@
 ## Project status
 - Done: segmentation baseline, YOLO + ByteTrack, Step 4 fusion,
   Step 8 motion (frozen: configs/motion_frozen.json, hash
-  15821ff9...1625).
+  15821ff9...1625), Step 9 decision rules (60f6e1d; revised after
+  the replay demo in 2a9ed63 and cc89948; configs/decision.json).
+  Step 9 decisions use only motion_trusted (dynamic_classes:
+  person), motion range 0-6 m, and stop for untrusted motion near
+  the route.
 - Splits (enforced by data_splits.json and the guard): Office/dynamic
   Capture_1 development, Capture_2 adjustment (used), Captures 3-4
   final; Gym/dynamic Captures 2-6 cross-scene final; Gym Capture_1
   excluded (prior use in Stage 3).
-- Decided, not yet implemented:
-  - Step 9: decisions use only motion_trusted (dynamic_classes:
-    person); no trusted motion near the route -> stop; motion
-    operating range 0-6 m as a decision-config setting.
-  - Step 6: a map cell is free only if labelled floor AND within a
-    height tolerance of the fitted floor plane; unseen cells count as
-    blocked.
-  - Load size comes from config ("configured, not measured").
-- Next, in order: Step 9 decision rules; Step 6 passage width; slimmed
+- Decided:
+  - Look-ahead (implemented): look_ahead_m = v * reaction_s +
+    v^2 / (2 * decel) + buffer_m = 1.0*0.5 + 1.0 + 1.5 = 3.0 m
+    (v, decel in robot.json; reaction_s, buffer_m in decision.json).
+    Rule 1 applies only in the stop zone (corridor within
+    look-ahead); rule 2 predicts entry into it; caution_ahead_m >=
+    look_ahead_m.
+  - Load (implemented): Euro pallet 1.20 x 0.80 m, 0.80 m side across
+    travel, centred, "configured, not measured" (configs/load.json).
+    Required width 1.00 m, computed only by footprint.py.
+  - Step 6 (not yet implemented): a map cell is free only if labelled
+    floor AND within a height tolerance of the fitted floor plane;
+    unseen cells count as blocked.
+  - Gesture module: git submodule at external/media_pipe_gesture,
+    connected only through an adapter that outputs GestureEvent.
+- Next, in order: gesture adapter; Step 6 passage width; slimmed
   evaluation harness; one final THUD++ evaluation. Unity warehouse
   scene is built by me in parallel.

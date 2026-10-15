@@ -27,15 +27,15 @@ The teammate's gesture code lives in a separate repository
 | `tests/test_thud_depth.py` | Unit tests for `thud_depth.py`, plus one dataset check (`python -m unittest discover -s tests`). |
 | `fuse_objects.py` | Step 4: per-tracked-object 3D position (camera and world frame) and floor context from depth + pose + predicted masks + tracks, with geometry checks and evaluation. |
 | `configs/fusion_office.json` | Inputs, pixel-selection rules, floor-context rule and evaluation settings for `fuse_objects.py`. |
-| `configs/robot.json` | Provisional robot width (0.60 m) and safety margin per side (0.10 m); load dimensions to come from Unity. |
+| `configs/robot.json` | Provisional robot width (0.60 m), safety margin per side (0.10 m), max speed (1.0 m/s), deceleration (0.5 m/s²); names the load file. |
 | `tests/test_fuse_objects.py` | Unit tests for the pose convention, pixel selection and point-to-box distance. |
 | `report_step4.py` | Step 4 report supplement: calibration used, fitted parameters, all-class table, unmatched-couch classification, timing and step sizes. Reads a fusion run; never modifies it. |
 | `configs/data_splits.json` | Splits: Office/dynamic Capture_1 development, Capture_2 adjustment, Capture_3/4 final evaluation only; Gym/dynamic Captures 2–6 cross-scene final evaluation; Gym/dynamic Capture_1 excluded. |
 | `motion.py` | Step 8 building blocks: observation quality, track resets, trailing-window velocity, labels with hysteresis, route geometry. |
 | `estimate_motion.py` | Step 8: world and relative motion per tracked observation from a fusion run, proxy-route time-to-route, evaluation, plots. |
-| `make_proxy_route.py` | Writes an explicit corridor config from the recorded camera path, with width from `robot.json`. |
+| `make_proxy_route.py` | Writes an explicit corridor config from the recorded camera path, with the one required width (`footprint.py`). |
 | `configs/motion_office.json` | Step 8 settings (fixed before evaluation), input runs and config paths. |
-| `configs/proxy_route_office_capture1.json` | The THUD `proxy_route` corridor: 16-point centreline, 3.70 m long, 0.80 m wide. |
+| `configs/proxy_route_office_capture1.json` | The THUD `proxy_route` corridor: 16-point centreline, 3.70 m long, 0.80 m wide (robot only; predates the load). |
 | `tests/test_motion.py` | Unit tests for `motion.py`. |
 | `report_motion.py` | Step 8 supplement from a motion run: velocity window and delay, resets by cause and class, per-person errors, time-to-route verdict. |
 | `run_paths.py` | Portable paths: run folders store `{dataset_root}/…`, `{output_root}/…`, `{project_root}/…` and resolve them on the current machine. |
@@ -44,7 +44,7 @@ The teammate's gesture code lives in a separate repository
 | `data_splits.py` | Split lookup and the `--final-evaluation` guard used by every script that reads a capture. |
 | `configs/motion_office_v1_equivalent.json` | Step 8 v1 settings expressed for the current code (development before/after only); reproduces the accepted baseline exactly. |
 | `configs/motion_office_k2_candidate.json` | `uncertainty_k = 2` candidate, evaluated once on Capture_2 for the declared k decision. |
-| `configs/proxy_route_office_capture2.json` | `proxy_route` corridor from the Capture_2 camera path. |
+| `configs/proxy_route_office_capture2.json` | `proxy_route` corridor from the Capture_2 camera path (0.80 m, robot only; predates the load). |
 | `configs/motion_frozen.json` | Frozen motion config: file name and SHA-256; required by `estimate_motion.py --final-evaluation`. |
 | `tests/test_device_and_splits.py` | Device selection CUDA → MPS → CPU with mocked availability; split guard. |
 | `../.github/workflows/tests.yml` | GitHub Actions: unit tests on windows-latest and macos-latest (runs when pushed). |
@@ -53,7 +53,8 @@ The teammate's gesture code lives in a separate repository
 | `run_decisions.py` | Runs scenario files through the rules; writes `decisions.csv` + `decision_log.json` per scenario. |
 | `replay_decisions.py` | Optional demo: frozen Step 8 motion run + `proxy_route` + placeholder passage and scripted gestures. |
 | `configs/decision.json` | Step 9 thresholds and timing, declared before any decision run. |
-| `configs/load.json` | Carried-load width and sideways offset: "configured, not measured". |
+| `configs/load.json` | Carried load: centred Euro pallet, 0.80 m across travel, "configured, not measured". |
+| `footprint.py` | The one required-width function (robot.json + load.json) and the decision look-ahead; standard library only. |
 | `configs/replay_script_office_capture2.json` | Placeholder passage and scripted gestures for the Capture_2 replay demo. |
 | `tests/test_decision.py`, `tests/scenarios/*.json` | Step 9 tests; scenarios are plain JSON so they can be replayed in Unity. |
 
@@ -536,8 +537,19 @@ export THUD_DATASET_ROOT=/Volumes/Data/RGB-D
 .venv/bin/python -m unittest discover -s tests -v
 ```
 
-The fusion run must exist locally. `make_proxy_route.py` needs re-running only if `robot.json` changes;
-`estimate_motion.py` refuses a corridor whose width disagrees with `robot.json`. Without `--route-config` every
+The fusion run must exist locally. `make_proxy_route.py` needs re-running only if the robot or load footprint
+changes; `estimate_motion.py` refuses a corridor whose width disagrees with the one required width
+(`footprint.load_footprint`, see Step 9).
+- **Width change since Step 9 (2026-10-15).** The committed `proxy_route` files are still 0.80 m wide (robot only,
+  made before the load was configured). They are the inputs of the recorded Step 8 runs and are kept unchanged.
+  With the Euro pallet the required width is 1.00 m, so `estimate_motion.py` now refuses these files.
+  Regenerate them with `make_proxy_route.py` before any further Step 8 run with a route (for example the final
+  evaluation). The frozen motion config is not affected: the route is a command-line input.
+- **Step 8 route fields are proxies.** `route_label`, `route_status`, `dist_to_route_centreline_m`,
+  `time_to_route_*` and `p_enter_route_within_horizon` in `motion_states.csv`, and the `proxy_route` `width_m`, are
+  not read by Step 9 decisions. Decisions read only the `proxy_route` centreline.
+
+Without `--route-config` every
 route field is `not_evaluated`. The motion config holds settings only; the fusion run and corridor are
 command-line inputs. On a final-evaluation capture the script refuses to run without `--final-evaluation`, and that
 flag also requires the frozen config (see Step 8 v2).
@@ -884,48 +896,93 @@ later, Unity frames use the same code; only the providers differ.
   passage / gesture segments, and expected decisions. Each one also lists the config values its timing assumes
   (`config_assumptions`); a test fails if `decision.json` no longer matches them.
 
+### Changes after the replay demo (design decisions, not tuning)
+
+These decisions were made on 2026-10-15 by the project owner after reviewing the first Capture_2 replay demo, and
+before any evaluation. They were not tuned on any result, and no decision result is a measurement.
+
+| Change | Before (first version, `60f6e1d`) | Now (`2a9ed63`, `cc89948`) |
+|---|---|---|
+| Look-ahead | Rule 1 used the whole corridor ahead; in the demo a person 6.70 m ahead on the route caused STOP | Rule 1 applies only inside the **stop zone**: the corridor within `look_ahead_m` = 3.0 m ahead. Rule 2 predicts entry into the stop zone |
+| Robot speed | not configured | `robot.json`: `max_speed_mps` 1.0, `decel_mps2` 0.5 |
+| Load | 0.70 m tray, required width 0.90 m | Centred Euro pallet (1.20 × 0.80 m, 0.80 m side across travel): required width **1.00 m** |
+| Required width | Computed in `decision.py`; Step 8 used its own robot-only rule; the engine widened narrower corridors | One function, `footprint.required_width`, reached through `footprint.load_footprint` (robot.json + the load file it names). Used by decisions, `make_proxy_route.py` and the `estimate_motion.py` corridor check. A corridor of any other width is refused |
+
+**Implementation bug found while checking the revised replay (`cc89948`).** The flat end of the zones was also
+applied where the route itself ends. A person just past the end of a short remaining route was then outside every
+zone: in the replay, track 1440 at 21.6 s, which the first version had stopped for. The zones now stay round at
+the route end, and a test covers this. The replay run made with the bug is superseded (see the demo below).
+
 ### Required width (configured, not measured)
 
 `required_width_m` = (furthest right − furthest left extent of robot and load, measured from the robot centre
-line) + 2 × `safety_margin_per_side_m`.
-- The robot comes from `configs/robot.json` (0.60 m, centred; margin 0.10 m per side).
-- The load comes from `configs/load.json` (0.70 m wide, offset 0.00 m), labelled **"configured, not measured"**.
-- Configured result: 0.70 + 0.20 = **0.90 m**. Tested examples:
-  - Off-centre load (0.70 m at +0.20 m): extents −0.30 to +0.55 m, so 1.05 m.
-  - Load narrower than the robot: 0.80 m.
-- `robot.json` keeps `"load": null`, so the Step 8 `proxy_route` corridor (robot only, 0.80 m) and its width check
-  are unchanged. The decision engine widens any corridor to at least `required_width_m`.
+line) + 2 × `safety_margin_per_side_m`. It is computed only by `footprint.required_width`.
+- **Robot:** `configs/robot.json`, 0.60 m wide and centred, with a margin of 0.10 m per side.
+- **Load:** the file `robot.json` names (`configs/load.json`). It is a Euro pallet carried with its 0.80 m side
+  across travel, centred (offset 0.00 m), labelled **"configured, not measured"**. `length_m` (1.20 m) is recorded
+  but not used by any rule yet.
+- **Configured result:** extents −0.40 to +0.40 m, so 0.80 + 0.20 = **1.00 m**.
+- **Tested examples:**
+  - the same pallet at +0.20 m: extents −0.30 to +0.60 m, so 1.10 m (likewise mirrored to the left);
+  - a load narrower than the robot: 0.80 m;
+  - no load: 0.80 m.
+- **Corridor width.** The decision corridor width must equal `required_width_m`. Decisions read only the
+  `proxy_route` centreline, never its `width_m` (0.80 m, robot only). They also never read the Step 8 route fields
+  in `motion_states.csv`; those stay labelled as proxies.
+
+### Look-ahead and zones
+
+`look_ahead_m = v × reaction_s + v² / (2 × decel) + buffer_m` = 1.0 × 0.5 + 1.0² / (2 × 0.5) + 1.5
+= 0.5 + 1.0 + 1.5 = **3.0 m**.
+- **Inputs:** `v` = `max_speed_mps` and `decel` = `decel_mps2` come from `robot.json`; `reaction_s` and
+  `buffer_m` come from `decision.json`.
+- **Stored values:** `decision.json` → `look_ahead` holds the formula, the inputs and the computed value.
+  `footprint.look_ahead` recomputes the value and refuses a mismatch.
+- **Range check:** loading also refuses `caution_ahead_m` < `look_ahead_m`. At the declared values they are equal
+  (3.0 m).
+
+Zones:
+- **Stop zone.** The corridor from the robot's projected position to `look_ahead_m` ahead. Its far end is
+  flat, so a person 0.1 m beyond the look-ahead on the centre line is outside it.
+  - The near end is round, which covers the robot body.
+  - Where the route itself ends sooner, that end is round too.
+- **Caution zone.** Outside the stop zone, within `caution_lateral_m` (1.0 m) of the corridor edge, up to
+  `caution_ahead_m` (3.0 m) ahead, with a flat far end.
+  - Because `caution_ahead_m` = `look_ahead_m`, it contains no corridor beyond the stop zone. An untrusted person
+    standing in the corridor 3.1 m ahead is in neither zone and does not stop the robot.
+  - The robot stops once that person is within 3.0 m. This is the declared behaviour, and `look_ahead_boundary`
+    records it.
+- **Rule 2 prediction.** The person's constant velocity is checked against the current stop zone, sampled every
+  0.05 s up to `entry_horizon_s` (3.0 s).
+  - This covers sideways entry and head-on approach.
+  - Robot motion is not added, because it is what the look-ahead (reaction, braking and buffer) covers.
+  - The reason gives the gap to the stop zone and the closing speed (gap ÷ time to entry).
+  - It is not a time to collision.
 
 ### Rules (checked top-down; the first match wins)
 
 | # | Condition | Decision | Reason (example) |
 |---|---|---|---|
-| 1 | Person inside the corridor (latest valid position; no motion needed) | STOP | `person in route: track 1 0.20 m from centre line, 2.50 m ahead` |
-| 2 | Person predicted to enter the corridor within `entry_horizon_s` (trusted motion only) | STOP | `person entering route: track 2 predicted to enter in 1.55 s (within 3.0 s) at 1.00 m/s` |
+| 1 | Person inside the stop zone (latest valid position; no motion needed) | STOP | `person in route: track 1 0.20 m from centre line, 2.50 m ahead (stop zone 3.00 m)` |
+| 2 | Person predicted to enter the stop zone within `entry_horizon_s` (trusted motion only) | STOP | `person entering stop zone: track 21 predicted to enter in 2.00 s (within 3.0 s), 2.00 m away, closing at 1.00 m/s` |
 | 3 | Valid STOP gesture from anyone | STOP | `STOP gesture: track 7 (confidence 0.90, 3 frames)` |
-| 4 | Person in the caution zone without trusted motion | STOP | `cannot confirm person's movement: track 3 in caution zone (0.45 m from corridor edge, 2.00 m ahead), motion untrusted` |
+| 4 | Person in the caution zone without trusted motion | STOP | `cannot confirm person's movement: track 3 in caution zone (0.40 m from corridor edge, 2.00 m ahead), motion untrusted` |
 | 5 | Passage blocked / unknown / not_evaluated | WAIT | `cannot confirm passage is clear: status unknown` |
-| 6 | MOVE requested but passage too narrow | STOP | `load too wide: 0.85 m available, 0.90 m needed` |
-| 7 | Valid MOVE held for `move_hold_s` and passage clear | MOVE | `passage clear: 1.50 m available, 0.90 m needed` |
+| 6 | MOVE requested but passage too narrow | STOP | `load too wide: 0.85 m available, 1.00 m needed` |
+| 7 | Valid MOVE held for `move_hold_s` and passage clear | MOVE | `passage clear: 1.50 m available, 1.00 m needed` |
 | 8 | Otherwise | WAIT | `waiting for instruction` |
 
 Definitions (also in `configs/decision.json` → `conventions`):
 - **Corridor.** Only the part of the route from the robot's projected position onwards counts. A person behind
   the robot is not "in route".
-- **Caution zone.** Outside the corridor, within `caution_lateral_m` (1.0 m) of its edge, along the next
-  `caution_ahead_m` (3.0 m) of route.
 - **Trusted motion.** All of the following must hold; otherwise motion counts as unknown:
   - `motion_trusted` is true;
   - the label is not `unknown` or `insufficient_history`;
   - there is a velocity and a current position;
   - `distance_m` ≤ `motion_range_m` (6.0 m).
-- **Prediction.** Constant velocity, sampled every 0.05 s up to `entry_horizon_s` (3.0 s), against the current
-  corridor. It is not a time to collision.
 - **Person memory.** A tracked person who drops out, or whose position becomes invalid, keeps the latest valid
   position for `person_memory_s` (1.0 s). It still counts for rule 1 and the caution zone (reason:
   `(remembered position)`).
-- **Unlocated person.** A person detected without a usable position counts as in the caution zone, unless their
-  measured distance is beyond `caution_ahead_m`.
 - **STOP overrides MOVE.** Any current STOP gesture cancels every MOVE gesture, even before it is accepted, so a
   STOP from one person always overrides a MOVE from another. While the STOP is unconfirmed the result is WAIT
   (rule 8); once accepted, it is STOP (rule 3).
@@ -933,6 +990,24 @@ Definitions (also in `configs/decision.json` → `conventions`):
   - `clear` without a width → unknown;
   - `clear` with a width below `required_width_m` → too_narrow;
   - a passage evaluated for a different required width → unknown.
+
+### A person without a position ("unlocated")
+
+A person is detected but has no usable ground-plane position: no current position and no remembered one. They
+count as **in the caution zone** unless their `distance_m` is beyond `caution_ahead_m` (3.0 m). Being "known to be
+more than 3 m away" therefore means a provider supplied a distance even though it could not supply a position:
+- **THUD replay (Step 8).** `distance_m` is the ground-plane distance from `camera_proxy` to the per-axis median of
+  the back-projected pixels that have valid depth, among the pixels selected for the track.
+  - It exists whenever any selected pixel has valid depth, including observations whose position is invalid
+    (`position_valid` false: too few valid-depth pixels, mostly saturated depth, or an unusable pixel selection).
+  - With no valid-depth pixel there is no distance, and the person always counts as in the caution zone.
+- **Unity (later).** The scene adapter must supply `distance_m` from its own range measurement, or None.
+- **Caveat: a median, not a lower bound.** If the selected pixels mix the person with a farther background, the
+  median can be farther than the person, and the exception can release a person who is in fact close.
+  - In the replay this affected every case. All 16 person observations without a valid position used
+    `box_all` (the whole detection box), and all 16 had `distance_m` > 3 m, so the exception released each of them.
+  - A safer variant, not adopted: require a lower bound (for example a near depth percentile) or drop the
+    exception.
 
 ### Timing (`configs/decision.json`)
 
@@ -947,15 +1022,18 @@ Definitions (also in `configs/decision.json` → `conventions`):
 - **Asymmetric switching.** Switching to STOP takes effect at once. Switching to MOVE, from any non-MOVE state
   including the first start, needs `resume_hold_s`. During that hold the output is WAIT (rule 8) with the hold
   progress in the reason.
-- **Provenance.** Every value was declared on 2026-10-15 before any decision run, chosen from physical reasoning.
-  The reasoning is in `decision.json` → `why`. The values have not been tuned, and they are provisional until the
-  project owner reviews them.
+- **Provenance.**
+  - The first version's values were declared on 2026-10-15 before any decision run, chosen from physical
+    reasoning (`decision.json` → `why`).
+  - The look-ahead, load and single-width changes were made later the same day, after the replay demo (see
+    above).
+  - Nothing has been tuned, and nothing has been evaluated.
 
 ### Outputs
 
 Each run writes a new folder; existing folders are never overwritten.
 - `run_decisions.py` → `outputs/decisions_scenarios_<date>_<time>/`:
-  - `run_info.json`: git commit, config hashes, required width;
+  - `run_info.json`: git commit, config hashes, footprint, look-ahead;
   - `config_used/`: decision.json, robot.json, load.json;
   - `summary.json`: expectation check per scenario;
   - one subfolder per scenario, holding the scenario file, `decisions.csv` and `decision_log.json`.
@@ -964,7 +1042,7 @@ Each run writes a new folder; existing folders are never overwritten.
 - **`decisions.csv`** has one row per timestamp: decision, rule, rule name, plain-English reason with numbers,
   contributing track IDs, passage status (input and effective), widths, person counts and active gestures.
 - **`decision_log.json`** holds the same records with a full snapshot of the inputs: every person's assessment,
-  the passage and the gesture state.
+  including stop-zone and caution-zone membership, gap and closing speed, plus the passage and the gesture state.
 
 ### Tests (`tests/test_decision.py`, no dataset)
 
@@ -975,54 +1053,65 @@ Each run writes a new folder; existing folders are never overwritten.
   - `conflict_narrow_passage_with_move`.
 - Gestures: `gesture_timeout` and `gesture_low_confidence`.
 - Timing and motion: `asymmetric_timing`, `unknown_motion` and `beyond_motion_range`.
-- Unit tests:
-  - required-width maths (centred, off-centre left/right, narrow load, no load);
+- Look-ahead: `look_ahead_boundary` and `head_on_approach`.
+- Look-ahead unit tests:
+  - the formula, and a stale declared value is refused;
+  - `caution_ahead_m` ≥ `look_ahead_m` is enforced;
+  - in route at `look_ahead_m` − 0.1 m → STOP;
+  - at `look_ahead_m` + 0.1 m, standing still → not STOP;
+  - head-on approach from 5 m → STOP (rule 2) while the person is still outside the stop zone;
+  - sideways entry, with the gap reported;
+  - the flat stop-zone end, and a round end where the route ends.
+- Width unit tests:
+  - Euro pallet maths (centred, off-centre left/right, narrow load, no load);
+  - `required_width` is defined only in `footprint.py`;
+  - a corridor of any other width is refused.
+- Other unit tests:
   - partial-polyline geometry;
   - a person behind the robot;
   - unlocated people;
-  - corridor widening;
   - a passage evaluated for a different width;
   - monotonic timestamps;
   - STOP hold counted in frames.
 - Isolation checks:
-  - `decision.py` imports only the standard library;
+  - `decision.py` and `footprint.py` import only the standard library;
   - no Step 9 file imports a reference loader;
   - output files are written;
   - an existing run folder is never reused.
 
-Scenario run: `outputs/decisions_scenarios_20261015_212507`. All 16 scenarios pass (`summary.json`).
+Scenario run: `outputs/decisions_scenarios_20261015_214223` (commit `cc89948`). All 18 scenarios pass. Earlier
+scenario runs (`…_212507`, 16 scenarios, first version; `…_214114`, before the route-end fix) are superseded.
 
 ### Demo: replay with placeholder passage and gestures (not an evaluation)
 
 The demo replays the frozen Step 8 motion run on Office/dynamic/Capture_2 (adjustment split):
 `outputs/motion_1388f_20261013_223619`, config sha256 `15821ff9…1625`, checked by the script.
 - **People:** Step 8 motion output, a reference-depth and reference-camera-pose baseline.
-- **Corridor:** `proxy_route`, widened from 0.80 m to the required 0.90 m.
-- **Robot position:** `camera_proxy`.
+- **Corridor:** the `proxy_route` centreline at the required 1.00 m.
+- **Robot position:** `camera_proxy`. The stop zone is 3.0 m.
 - **Passage:** a placeholder, "clear, 1.50 m". This is scripted, not measured.
 - **Gestures:** scripted. A MOVE runs from 0.5 s to the end; a second gesturer shows STOP from 12.0 to 13.0 s.
-- **Output:** `outputs/decisions_replay_1388f_20261015_212612` (commit `c7a9835`), including `decision_timeline.png`.
-  - An earlier run, `outputs/decisions_replay_1388f_20261015_212508` (commit `60f6e1d`), is superseded. Its
-    decisions are identical, but the plot cut off part of the label line.
+- **Output:** `outputs/decisions_replay_1388f_20261015_214224` (commit `cc89948`), including `decision_timeline.png`.
+- **Superseded runs:**
+  - `…_212508` (`60f6e1d`, first version, plot label cut off);
+  - `…_212612` (`c7a9835`, first version);
+  - `…_214115` (`2a9ed63`, route-end bug).
 
-| Decision | Frames (of 1388) |
-|---|---|
-| STOP rule 1 person in route | 237 (17.1%) |
-| STOP rule 2 person entering | 64 (4.6%) |
-| STOP rule 3 STOP gesture | 89 (6.4%) |
-| STOP rule 4 movement unconfirmed | 154 (11.1%) |
-| MOVE rule 7 | 590 (42.5%) |
-| WAIT rule 8 (MOVE held / resume hold) | 254 (18.3%) |
+| Decision | First version (`…_212612`) | Revised (`…_214224`) |
+|---|---|---|
+| STOP rule 1 person in stop zone | 237 (17.1%) | 185 (13.3%) |
+| STOP rule 2 entering stop zone | 64 (4.6%) | 64 (4.6%) |
+| STOP rule 3 STOP gesture | 89 (6.4%) | 89 (6.4%) |
+| STOP rule 4 movement unconfirmed | 154 (11.1%) | 191 (13.8%) |
+| MOVE rule 7 | 590 (42.5%) | 605 (43.6%) |
+| WAIT rule 8 (MOVE held / resume hold) | 254 (18.3%) | 254 (18.3%) |
 
-What the timeline shows:
-- **0–2.0 s:** WAIT while the MOVE gesture and the resume hold run.
-- **4.05 s:** STOP rule 1 for track 380, 6.70 m ahead on the route.
-- **8.1 s:** rule 2 for track 455 (enters in 0.80 s).
-- **9.0 s:** rule 4 once track 455's motion is untrusted. The person memory keeps it to 10.2 s.
-- **10.2–11.25 s:** resume hold, then MOVE.
-- **12.0 s:** WAIT for one frame while the unconfirmed STOP cancels the MOVE, then STOP rule 3 until the gesture
-  times out (13.5 s).
-- **21.6 s:** rule 4 for an untrusted person 0.30 m from the corridor edge.
+What changed in the timeline (of 1388 frames):
+- **4.05 s:** track 380, 6.70 m ahead on the route, no longer causes STOP; it is beyond the stop zone.
+- **4.30 s:** STOP now starts with rule 4 for track 382, 0.05 m from the wider corridor's edge. It moves to rule 2
+  at 4.91 s and to rule 1 at 5.01 s.
+- **Later events are unchanged:** rule 2 then rule 4 for track 455 (8.1–10.2 s), the scripted STOP gesture
+  (12.0–13.5 s) and rule 4 for track 1440 at 21.6 s.
 
 None of this is a correctness measurement: there is no decision ground truth, and the passage and gestures are
 scripted.
@@ -1044,6 +1133,7 @@ scripted.
   and a replay with a placeholder passage and scripted gestures; they have not been evaluated. `camera_proxy` is
   not the robot position.
 - The load size is configured, not measured. The gesture module is not connected (no adapter yet).
+- Unlocated people are released from the caution zone on a median distance, which is not a lower bound (Step 9).
 - Portability is tested with synthetic run folders and on Windows. It has not yet been run on a real macOS
   machine.
 - Semantic labels are used only as evaluation references, never as model input.
