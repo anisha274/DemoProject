@@ -48,6 +48,14 @@ The teammate's gesture code lives in a separate repository
 | `configs/motion_frozen.json` | Frozen motion config: file name and SHA-256; required by `estimate_motion.py --final-evaluation`. |
 | `tests/test_device_and_splits.py` | Device selection CUDA → MPS → CPU with mocked availability; split guard. |
 | `../.github/workflows/tests.yml` | GitHub Actions: unit tests on windows-latest and macos-latest (runs when pushed). |
+| `decision.py` | Step 9 core (standard library only): input dataclasses, required width, corridor geometry, gesture filter, rules 1–8 with timing. |
+| `decision_io.py` | Step 9 configs, placeholder providers (scenario / script files), scenario runner, run-folder writers. |
+| `run_decisions.py` | Runs scenario files through the rules; writes `decisions.csv` + `decision_log.json` per scenario. |
+| `replay_decisions.py` | Optional demo: frozen Step 8 motion run + `proxy_route` + placeholder passage and scripted gestures. |
+| `configs/decision.json` | Step 9 thresholds and timing, declared before any decision run. |
+| `configs/load.json` | Carried-load width and sideways offset: "configured, not measured". |
+| `configs/replay_script_office_capture2.json` | Placeholder passage and scripted gestures for the Capture_2 replay demo. |
+| `tests/test_decision.py`, `tests/scenarios/*.json` | Step 9 tests; scenarios are plain JSON so they can be replayed in Unity. |
 
 ## Setup
 
@@ -831,6 +839,157 @@ config. Captures 3–4 and Gym/dynamic have not been touched.
 
 On macOS, use `.venv/bin/python` and forward slashes, and set `THUD_DATASET_ROOT`.
 
+## Step 9: decision rules (MOVE / STOP / WAIT)
+
+Windows PowerShell:
+
+```powershell
+cd E:\RobotVisionWorkspace\robot_vision
+.\.venv\Scripts\python.exe -m unittest tests.test_decision -v
+.\.venv\Scripts\python.exe run_decisions.py --all-scenarios
+.\.venv\Scripts\python.exe replay_decisions.py --motion-run outputs\motion_1388f_20261013_223619 --route-config configs\proxy_route_office_capture2.json --script configs\replay_script_office_capture2.json
+```
+
+macOS Terminal:
+
+```bash
+cd /path/to/RobotVisionWorkspace/robot_vision
+.venv/bin/python -m unittest tests.test_decision -v
+.venv/bin/python run_decisions.py --all-scenarios
+.venv/bin/python replay_decisions.py --motion-run outputs/motion_1388f_20261013_223619 --route-config configs/proxy_route_office_capture2.json --script configs/replay_script_office_capture2.json
+```
+
+The tests and `run_decisions.py` need no dataset. `replay_decisions.py` needs only the local Step 8 and Step 4 run
+folders (no dataset, no inference).
+
+### Input contract (`decision.py`)
+
+A caller builds one `DecisionFrame` per timestamp and passes it to `DecisionEngine.step()`. THUD replays and,
+later, Unity frames use the same code; only the providers differ.
+
+| Dataclass | Fields |
+|---|---|
+| `PersonState` | `track_id`, `timestamp`, `position_xz` (ground plane, or None), `distance_m`, `motion_label`, `velocity_xz` (or None), `motion_trusted` |
+| `PassageState` | `status` (clear / too_narrow / blocked / unknown / not_evaluated), `available_width_m` (or None), `required_width_m` |
+| `GestureEvent` | `timestamp`, `track_id` (or None), `gesture` (STOP / MOVE / NONE), `confidence` |
+| `RouteCorridor` | `centreline_xz` (polyline in travel order), `width_m`, `label` |
+| `DecisionFrame` | `timestamp`, `persons`, `passage`, `gestures`, `robot_xz` (or None: the whole corridor counts as ahead) |
+
+- **Providers** (`decision_io.py`): `persons_at(t)`, `passage_at(t)`, `gestures_at(t)`.
+  - Step 6 and the gesture module are not connected yet. `ScriptedPassage` and `ScriptedGestures` are placeholders
+    that read scenario or script files.
+  - The real gesture module will connect later through an adapter that outputs `GestureEvent`. The gesture
+    module's own code is not touched.
+- **Scenario files** (`tests/scenarios/*.json`) are plain JSON: corridor, time grid, robot position, person /
+  passage / gesture segments, and expected decisions. Each one also lists the config values its timing assumes
+  (`config_assumptions`); a test fails if `decision.json` no longer matches them.
+
+### Required width (configured, not measured)
+
+`required_width_m` = (furthest right − furthest left extent of robot and load, measured from the robot centre
+line) + 2 × `safety_margin_per_side_m`.
+- The robot comes from `configs/robot.json` (0.60 m, centred; margin 0.10 m per side).
+- The load comes from `configs/load.json` (0.70 m wide, offset 0.00 m), labelled **"configured, not measured"**.
+- Configured result: 0.70 + 0.20 = **0.90 m**. Tested examples:
+  - Off-centre load (0.70 m at +0.20 m): extents −0.30 to +0.55 m, so 1.05 m.
+  - Load narrower than the robot: 0.80 m.
+- `robot.json` keeps `"load": null`, so the Step 8 `proxy_route` corridor (robot only, 0.80 m) and its width check
+  are unchanged. The decision engine widens any corridor to at least `required_width_m`.
+
+### Rules (checked top-down; the first match wins)
+
+| # | Condition | Decision | Reason (example) |
+|---|---|---|---|
+| 1 | Person inside the corridor (latest valid position; no motion needed) | STOP | `person in route: track 1 0.20 m from centre line, 2.50 m ahead` |
+| 2 | Person predicted to enter the corridor within `entry_horizon_s` (trusted motion only) | STOP | `person entering route: track 2 predicted to enter in 1.55 s (within 3.0 s) at 1.00 m/s` |
+| 3 | Valid STOP gesture from anyone | STOP | `STOP gesture: track 7 (confidence 0.90, 3 frames)` |
+| 4 | Person in the caution zone without trusted motion | STOP | `cannot confirm person's movement: track 3 in caution zone (0.45 m from corridor edge, 2.00 m ahead), motion untrusted` |
+| 5 | Passage blocked / unknown / not_evaluated | WAIT | `cannot confirm passage is clear: status unknown` |
+| 6 | MOVE requested but passage too narrow | STOP | `load too wide: 0.85 m available, 0.90 m needed` |
+| 7 | Valid MOVE held for `move_hold_s` and passage clear | MOVE | `passage clear: 1.50 m available, 0.90 m needed` |
+| 8 | Otherwise | WAIT | `waiting for instruction` |
+
+Definitions (also in `configs/decision.json` → `conventions`):
+- **Corridor.** Only the part of the route from the robot's projected position onwards counts. A person behind
+  the robot is not "in route".
+- **Caution zone.** Outside the corridor, within `caution_lateral_m` (1.0 m) of its edge, along the next
+  `caution_ahead_m` (3.0 m) of route.
+- **Trusted motion.** All of the following must hold; otherwise motion counts as unknown:
+  - `motion_trusted` is true;
+  - the label is not `unknown` or `insufficient_history`;
+  - there is a velocity and a current position;
+  - `distance_m` ≤ `motion_range_m` (6.0 m).
+- **Prediction.** Constant velocity, sampled every 0.05 s up to `entry_horizon_s` (3.0 s), against the current
+  corridor. It is not a time to collision.
+- **Person memory.** A tracked person who drops out, or whose position becomes invalid, keeps the latest valid
+  position for `person_memory_s` (1.0 s). It still counts for rule 1 and the caution zone (reason:
+  `(remembered position)`).
+- **Unlocated person.** A person detected without a usable position counts as in the caution zone, unless their
+  measured distance is beyond `caution_ahead_m`.
+- **STOP overrides MOVE.** Any current STOP gesture cancels every MOVE gesture, even before it is accepted, so a
+  STOP from one person always overrides a MOVE from another. While the STOP is unconfirmed the result is WAIT
+  (rule 8); once accepted, it is STOP (rule 3).
+- **Passage consistency.** These cases are not taken at face value:
+  - `clear` without a width → unknown;
+  - `clear` with a width below `required_width_m` → too_narrow;
+  - a passage evaluated for a different required width → unknown.
+
+### Timing (`configs/decision.json`)
+
+| Setting | Value | Meaning |
+|---|---|---|
+| `stop_hold_frames` | 3 | STOP gesture accepted after 3 consecutive gesture frames |
+| `move_hold_s` | 0.5 s | MOVE gesture accepted after being held 0.5 s |
+| `gesture_timeout_s` | 0.5 s | a gesture older than this counts as NONE |
+| `gesture_min_confidence` | 0.6 | below this a gesture counts as NONE |
+| `resume_hold_s` | 1.0 s | MOVE only after the rule-7 conditions hold continuously for 1 s |
+
+- **Asymmetric switching.** Switching to STOP takes effect at once. Switching to MOVE, from any non-MOVE state
+  including the first start, needs `resume_hold_s`. During that hold the output is WAIT (rule 8) with the hold
+  progress in the reason.
+- **Provenance.** Every value was declared on 2026-10-15 before any decision run, chosen from physical reasoning.
+  The reasoning is in `decision.json` → `why`. The values have not been tuned, and they are provisional until the
+  project owner reviews them.
+
+### Outputs
+
+Each run writes a new folder; existing folders are never overwritten.
+- `run_decisions.py` → `outputs/decisions_scenarios_<date>_<time>/`:
+  - `run_info.json`: git commit, config hashes, required width;
+  - `config_used/`: decision.json, robot.json, load.json;
+  - `summary.json`: expectation check per scenario;
+  - one subfolder per scenario, holding the scenario file, `decisions.csv` and `decision_log.json`.
+- `replay_decisions.py` → `outputs/decisions_replay_<N>f_<date>_<time>/`: the same files plus the route, script
+  and frozen-motion records in `config_used/`, and `decision_timeline.png`.
+- **`decisions.csv`** has one row per timestamp: decision, rule, rule name, plain-English reason with numbers,
+  contributing track IDs, passage status (input and effective), widths, person counts and active gestures.
+- **`decision_log.json`** holds the same records with a full snapshot of the inputs: every person's assessment,
+  the passage and the gesture state.
+
+### Tests (`tests/test_decision.py`, no dataset)
+
+- One scenario per rule: `rule1_…` to `rule8_…`.
+- Conflicts:
+  - `conflict_stop_vs_move`: STOP vs MOVE from different people;
+  - `conflict_person_in_route_with_move`;
+  - `conflict_narrow_passage_with_move`.
+- Gestures: `gesture_timeout` and `gesture_low_confidence`.
+- Timing and motion: `asymmetric_timing`, `unknown_motion` and `beyond_motion_range`.
+- Unit tests:
+  - required-width maths (centred, off-centre left/right, narrow load, no load);
+  - partial-polyline geometry;
+  - a person behind the robot;
+  - unlocated people;
+  - corridor widening;
+  - a passage evaluated for a different width;
+  - monotonic timestamps;
+  - STOP hold counted in frames.
+- Isolation checks:
+  - `decision.py` imports only the standard library;
+  - no Step 9 file imports a reference loader;
+  - output files are written;
+  - an existing run folder is never reused.
+
 ## Known limitations
 
 - Depth decoding is validated only for the THUD **synthetic** captures above. Real-scene depth and any
@@ -844,8 +1003,10 @@ On macOS, use `.venv/bin/python` and forward slashes, and set `THUD_DATASET_ROOT
 - Static furniture is still not a trusted motion class. On Capture_1 it is mostly removed, not measured.
 - The reference is a visible-surface proxy, not person-centre ground truth. Capture_3 and Capture_4 have not
   been used.
-- No passage width, clearance, occupancy map or movement decision is computed yet. `camera_proxy` is not the
-  robot position.
+- No passage width, clearance or occupancy map is computed yet (Step 6). Step 9 decisions run on scenario files
+  and a replay with a placeholder passage and scripted gestures; they have not been evaluated. `camera_proxy` is
+  not the robot position.
+- The load size is configured, not measured. The gesture module is not connected (no adapter yet).
 - Portability is tested with synthetic run folders and on Windows. It has not yet been run on a real macOS
   machine.
 - Semantic labels are used only as evaluation references, never as model input.

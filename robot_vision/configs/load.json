@@ -1,0 +1,8 @@
+{
+  "label": "configured, not measured",
+  "note": "Provisional carried-load (tray) size for Step 9 required width. Not measured: to be replaced by a measurement from the Unity warehouse scene. robot.json keeps \"load\": null, so the Step 8 proxy_route corridor (robot only, 0.80 m) is unchanged.",
+  "width_m": 0.70,
+  "lateral_offset_m": 0.0,
+  "lateral_offset_convention": "load centre minus robot centre line, across the direction of travel; positive = to the robot's right",
+  "declared": "2026-10-15, before any Step 9 decision run"
+}
