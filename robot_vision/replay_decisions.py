@@ -100,7 +100,7 @@ def plot(decisions, out: Path, title_note: str) -> None:
     rules = [d.rule for d in decisions]
     ax.step(t, rules, where="post", color=muted, linewidth=1)
     ax.scatter(t, rules, s=8, c=[status[d.decision] for d in decisions], linewidths=0, zorder=3)
-    names = {1: "1 person in route", 2: "2 person entering", 3: "3 STOP gesture", 4: "4 movement unconfirmed",
+    names = {1: "1 person in stop zone", 2: "2 entering stop zone", 3: "3 STOP gesture", 4: "4 movement unconfirmed",
              5: "5 passage unconfirmed", 6: "6 load too wide", 7: "7 passage clear (MOVE)", 8: "8 waiting"}
     ax.set_yticks(list(names), list(names.values()))
     ax.set_ylim(8.6, 0.4)
@@ -110,9 +110,9 @@ def plot(decisions, out: Path, title_note: str) -> None:
     # people: observed vs. inside the route or its caution zone
     ax = axes[2]
     obs = [sum(a["observed"] for a in d.snapshot["persons"]) for d in decisions]
-    near = [sum(a["in_route"] or a["in_caution_zone"] for a in d.snapshot["persons"]) for d in decisions]
+    near = [sum(a["in_stop_zone"] or a["in_caution_zone"] for a in d.snapshot["persons"]) for d in decisions]
     ax.step(t, obs, where="post", color=s1, linewidth=2, label="people tracked this frame")
-    ax.step(t, near, where="post", color=s2, linewidth=2, linestyle=(0, (4, 2)), label="in route or caution zone")
+    ax.step(t, near, where="post", color=s2, linewidth=2, linestyle=(0, (4, 2)), label="in stop zone or caution zone")
     top = max(max(obs), max(near), 1)
     ax.set_ylim(-0.2, top + 0.8)
     ax.set_yticks(range(0, top + 1))
@@ -158,7 +158,8 @@ def main() -> None:
     fusion = rp.resolve(minfo["fusion_run"], rts)
     frames = [json.loads(l) for l in (fusion / "frames.jsonl").read_text(encoding="utf-8").splitlines() if l]
     persons = load_persons(motion / "motion_states.csv")
-    corridor = RouteCorridor(tuple(tuple(q) for q in route_cfg["centreline_xz_m"]), route_cfg["width_m"],
+    # only the proxy_route centreline is read; its width_m (robot-only proxy) is not used
+    corridor = RouteCorridor(tuple(tuple(q) for q in route_cfg["centreline_xz_m"]), req["required_width_m"],
                              route_cfg["label"])
     engine = DecisionEngine(cfg, req, corridor)
     passage = dio.ScriptedPassage(script["passage"], req["required_width_m"])
@@ -171,26 +172,28 @@ def main() -> None:
                                                    tuple(gestures.gestures_at(t)), robot_xz)))
 
     out = dio.new_run_dir(cfg, f"decisions_replay_{len(frames)}f")
-    paths = [cfg_path, dio.resolve(cfg["paths"]["robot_config"]), dio.resolve(cfg["paths"]["load_config"]),
-             dio.resolve(a.route_config), dio.resolve(a.script), dio.resolve(a.frozen_record)]
+    paths = [cfg_path, *dio.footprint_files(req), dio.resolve(a.route_config), dio.resolve(a.script),
+             dio.resolve(a.frozen_record)]
     hashes = dio.copy_configs(out, paths)
     labels = {"run": LABEL, "positions": "reference-depth and reference-camera-pose baseline (Step 8 frozen run)",
               "corridor": "proxy_route", "robot_position": "camera_proxy", "passage": script["passage_note"],
               "gestures": script["gestures_note"], "load": load["label"]}
     info = dio.run_info(cfg_path, {
-        "labels": labels, "config_sha256": hashes, "required_width": req,
-        "corridor_width_m": engine.corridor_width_m, "route_config_width_m": route_cfg["width_m"],
-        "corridor_width_note": "proxy_route is robot-only (0.80 m); the decision corridor is widened to the "
-                               "robot-and-load required width",
+        "labels": labels, "config_sha256": hashes, "required_width": dio.footprint_record(req),
+        "look_ahead": cfg["look_ahead"], "corridor_width_m": engine.corridor_width_m,
+        "route_config_note": "only the proxy_route centreline is read; its width_m and the Step 8 route fields "
+                             "in motion_states.csv are proxies and are not read by decisions",
         "motion_run": str(motion), "motion_config_sha256": minfo["config_sha256"], "capture": minfo["capture"],
         "split_of_this_capture": split, "fusion_run_frames": str(fusion / "frames.jsonl"),
         "frames": len(frames), "person_rows": sum(len(v) for v in persons.values()),
         "decision_config": cfg, "replay_script": script})
     dio.write_json(out / "run_info.json", info)
-    dio.write_decisions(out, decisions, {"labels": labels, "git": info["git"], "required_width": req})
+    dio.write_decisions(out, decisions, {"labels": labels, "git": info["git"],
+                                         "required_width": dio.footprint_record(req)})
     note = (f"{minfo['capture']} ({split} split) | people: frozen Step 8 motion, reference-depth and "
             f"reference-camera-pose baseline\ncorridor: proxy_route, {engine.corridor_width_m:.2f} m | robot: "
-            f"camera_proxy | passage and gestures: scripted placeholders | load: {load['label']}")
+            f"camera_proxy | stop zone {engine.look_ahead_m:.2f} m | passage and gestures: scripted placeholders | "
+            f"load: {load['label']}")
     plot(decisions, out / "decision_timeline.png", note)
     dio.mark_complete(out)
     counts = {}

@@ -1,5 +1,5 @@
-"""Step 9 decision rules: scenario files (one per rule, conflicts, timing, motion trust), required-width maths,
-geometry and output files. No dataset needed."""
+"""Step 9 decision rules: scenario files (one per rule, conflicts, timing, motion trust, look-ahead),
+required-width and look-ahead maths, geometry and output files. No dataset needed."""
 
 import ast
 import csv
@@ -16,11 +16,14 @@ sys.path.insert(0, str(ROOT))
 
 import decision as dec  # noqa: E402
 import decision_io as dio  # noqa: E402
+import footprint as fp  # noqa: E402
 
 SCENARIOS = sorted((ROOT / "tests" / "scenarios").glob("*.json"))
-ROBOT = {"robot_width_m": 0.60, "safety_margin_per_side_m": 0.10}
-CORRIDOR = dec.RouteCorridor(((0.0, 0.0), (0.0, 20.0)), 0.9)
-CLEAR = dec.PassageState("clear", 1.5, 0.9)
+ROBOT = {"robot_width_m": 0.60, "safety_margin_per_side_m": 0.10, "max_speed_mps": 1.0, "decel_mps2": 0.5}
+PALLET = {"width_m": 0.80, "length_m": 1.20, "lateral_offset_m": 0.0, "label": "configured, not measured"}
+REQ = fp.load_footprint()["required_width_m"]
+CORRIDOR = dec.RouteCorridor(((0.0, 0.0), (0.0, 20.0)), REQ)
+CLEAR = dec.PassageState("clear", 1.5, REQ)
 
 
 def person(tid, pos, dist=None, label="unknown", vel=None, trusted=False, t=0.0):
@@ -36,7 +39,8 @@ class ScenarioTests(unittest.TestCase):
         names = {p.stem for p in SCENARIOS}
         for need in [f"rule{i}_" for i in range(1, 9)] + [
                 "conflict_stop_vs_move", "conflict_person_in_route_with_move", "conflict_narrow_passage_with_move",
-                "gesture_timeout", "asymmetric_timing", "unknown_motion", "beyond_motion_range"]:
+                "gesture_timeout", "asymmetric_timing", "unknown_motion", "beyond_motion_range",
+                "look_ahead_boundary", "head_on_approach"]:
             self.assertTrue(any(n.startswith(need) for n in names), need)
 
     def test_scenarios(self):
@@ -60,32 +64,105 @@ class ScenarioTests(unittest.TestCase):
 
 
 class RequiredWidthTests(unittest.TestCase):
-    def test_centred_load(self):
-        r = dec.required_width(ROBOT, {"width_m": 0.70, "lateral_offset_m": 0.0, "label": "configured, not measured"})
-        self.assertAlmostEqual(r["required_width_m"], 0.70 + 0.20)
-        self.assertEqual((r["left_extent_m"], r["right_extent_m"]), (-0.35, 0.35))
+    def test_centred_euro_pallet(self):
+        # pallet 0.80 m across travel, centred: extents -0.40..0.40 -> 0.80 + 2 * 0.10
+        r = fp.required_width(ROBOT, PALLET)
+        self.assertAlmostEqual(r["required_width_m"], 1.00)
+        self.assertEqual((r["left_extent_m"], r["right_extent_m"]), (-0.40, 0.40))
         self.assertEqual(r["load_label"], "configured, not measured")
 
     def test_off_centre_load(self):
-        # robot -0.30..0.30, load 0.20 +- 0.35 = -0.15..0.55 -> 0.85 + 0.20
-        r = dec.required_width(ROBOT, {"width_m": 0.70, "lateral_offset_m": 0.20})
-        self.assertAlmostEqual(r["required_width_m"], 1.05)
-        self.assertEqual((r["left_extent_m"], r["right_extent_m"]), (-0.30, 0.55))
-        left = dec.required_width(ROBOT, {"width_m": 0.70, "lateral_offset_m": -0.20})
-        self.assertAlmostEqual(left["required_width_m"], 1.05)
-        self.assertEqual((left["left_extent_m"], left["right_extent_m"]), (-0.55, 0.30))
+        # robot -0.30..0.30, pallet 0.20 +- 0.40 = -0.20..0.60 -> 0.90 + 0.20
+        r = fp.required_width(ROBOT, {**PALLET, "lateral_offset_m": 0.20})
+        self.assertAlmostEqual(r["required_width_m"], 1.10)
+        self.assertEqual((r["left_extent_m"], r["right_extent_m"]), (-0.30, 0.60))
+        left = fp.required_width(ROBOT, {**PALLET, "lateral_offset_m": -0.20})
+        self.assertAlmostEqual(left["required_width_m"], 1.10)
+        self.assertEqual((left["left_extent_m"], left["right_extent_m"]), (-0.60, 0.30))
 
     def test_load_narrower_than_robot_and_no_load(self):
-        self.assertAlmostEqual(dec.required_width(ROBOT, {"width_m": 0.40, "lateral_offset_m": 0.1})["required_width_m"], 0.80)
-        self.assertAlmostEqual(dec.required_width(ROBOT, None)["required_width_m"], 0.80)
+        self.assertAlmostEqual(fp.required_width(ROBOT, {"width_m": 0.40, "lateral_offset_m": 0.1})["required_width_m"], 0.80)
+        self.assertAlmostEqual(fp.required_width(ROBOT, None)["required_width_m"], 0.80)
 
     def test_configured_files(self):
-        _, robot, load, req = dio.load_decision_config()
+        foot = fp.load_footprint()
+        load = foot["load"]
         self.assertEqual(load["label"], "configured, not measured")
-        self.assertAlmostEqual(req["required_width_m"],
-                               max(robot["robot_width_m"] / 2, load["lateral_offset_m"] + load["width_m"] / 2)
-                               - min(-robot["robot_width_m"] / 2, load["lateral_offset_m"] - load["width_m"] / 2)
-                               + 2 * robot["safety_margin_per_side_m"])
+        self.assertEqual((load["width_m"], load["length_m"], load["lateral_offset_m"]), (0.80, 1.20, 0.0))
+        self.assertAlmostEqual(foot["required_width_m"], 1.00)
+        self.assertEqual(dio.load_decision_config()[3]["required_width_m"], foot["required_width_m"])
+
+    def test_one_required_width_function(self):
+        defs = []
+        for f in ROOT.glob("*.py"):
+            tree = ast.parse(f.read_text(encoding="utf-8"))
+            defs += [f.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "required_width"]
+        self.assertEqual(defs, ["footprint.py"])
+        for f in ["make_proxy_route.py", "estimate_motion.py", "decision_io.py"]:
+            self.assertIn("load_footprint", (ROOT / f).read_text(encoding="utf-8"), f)
+
+
+class LookAheadTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.cfg, _, _, cls.req = dio.load_decision_config()
+        cls.L = cls.cfg["look_ahead"]["look_ahead_m"]
+
+    def engine(self):
+        return dec.DecisionEngine(self.cfg, self.req, CORRIDOR)
+
+    def test_formula(self):
+        la = fp.look_ahead(ROBOT, {"reaction_s": 0.5, "buffer_m": 1.5})
+        self.assertAlmostEqual(la["look_ahead_m"], 1.0 * 0.5 + 1.0 / (2 * 0.5) + 1.5)
+        self.assertAlmostEqual(la["look_ahead_m"], 3.0)
+        self.assertAlmostEqual(self.L, 3.0)
+        with self.assertRaises(ValueError):  # declared value no longer matches its inputs
+            fp.look_ahead({**ROBOT, "max_speed_mps": 1.5}, {"reaction_s": 0.5, "buffer_m": 1.5, "look_ahead_m": 3.0})
+
+    def test_caution_ahead_must_cover_look_ahead(self):
+        self.assertGreaterEqual(self.cfg["caution_ahead_m"], self.L)
+        with self.assertRaises(ValueError):
+            dec.DecisionEngine({**self.cfg, "caution_ahead_m": self.L - 0.5}, self.req, CORRIDOR)
+
+    def test_in_route_inside_look_ahead_stops(self):
+        d = self.engine().step(dec.DecisionFrame(0.0, (person(1, (0.0, self.L - 0.1), self.L - 0.1),), CLEAR, (),
+                                                 (0.0, 0.0)))
+        self.assertEqual((d.decision, d.rule), ("STOP", 1))
+
+    def test_in_route_beyond_look_ahead_standing_still_does_not_stop(self):
+        d = self.engine().step(dec.DecisionFrame(
+            0.0, (person(1, (0.0, self.L + 0.1), self.L + 0.1, "stationary", (0.0, 0.0), True),), CLEAR, (), (0.0, 0.0)))
+        self.assertEqual(d.decision, "WAIT")
+        self.assertEqual(d.rule, 8)
+        self.assertFalse(d.snapshot["persons"][0]["in_stop_zone"])
+
+    def test_stop_zone_end_is_flat(self):
+        # inside the round cap a half-width past the end would be "inside"; the flat end excludes it
+        e = self.engine()
+        half = self.req["required_width_m"] / 2
+        self.assertFalse(e._in_stop_zone((0.0, self.L + half * 0.8), 0.0)[0])
+        self.assertTrue(e._in_stop_zone((half * 0.9, self.L - 0.01), 0.0)[0])
+
+    def test_head_on_approach_from_5_m_stops_before_stop_zone(self):
+        e = self.engine()
+        first_stop = None
+        for k in range(0, 31):  # 3 s at 10 Hz, walking head-on at 1 m/s from 5 m
+            t = k * 0.1
+            z = 5.0 - t
+            d = e.step(dec.DecisionFrame(t, (person(1, (0.0, z), z, "approaching", (0.0, -1.0), True, t),), CLEAR,
+                                         (), (0.0, 0.0)))
+            if d.decision == "STOP" and first_stop is None:
+                first_stop = (t, z, d)
+        t, z, d = first_stop
+        self.assertEqual(d.rule, 2)
+        self.assertGreater(z, self.L)  # stopped while the person was still outside the stop zone
+        self.assertIn("closing at 1.00 m/s", d.reason)
+
+    def test_sideways_entry(self):
+        d = self.engine().step(dec.DecisionFrame(
+            0.0, (person(1, (3.0, 2.0), 3.6, "moving_lateral", (-1.0, 0.0), True),), CLEAR, (), (0.0, 0.0)))
+        self.assertEqual((d.decision, d.rule), ("STOP", 2))
+        self.assertAlmostEqual(d.snapshot["persons"][0]["gap_to_stop_zone_m"], 3.0 - self.req["required_width_m"] / 2)
 
 
 class GeometryAndEdgeCaseTests(unittest.TestCase):
@@ -126,14 +203,15 @@ class GeometryAndEdgeCaseTests(unittest.TestCase):
         d = e.step(dec.DecisionFrame(0.2, (person(3, None, None),), CLEAR, (), (0.0, 0.0)))
         self.assertEqual((d.decision, d.rule), ("STOP", 4))
 
-    def test_corridor_never_narrower_than_required(self):
-        e = self.engine(dec.RouteCorridor(((0.0, 0.0), (0.0, 20.0)), 0.5))
-        self.assertAlmostEqual(e.corridor_width_m, self.req["required_width_m"])
-        d = e.step(dec.DecisionFrame(0.0, (person(1, (0.4, 2.0), 2.0),), CLEAR, (), (0.0, 0.0)))
-        self.assertEqual(d.rule, 1)  # 0.4 m off-centre: outside a 0.5 m corridor, inside the 0.9 m footprint
+    def test_corridor_width_must_be_the_required_width(self):
+        with self.assertRaises(ValueError):
+            self.engine(dec.RouteCorridor(((0.0, 0.0), (0.0, 20.0)), 0.8))  # e.g. the robot-only proxy_route width
+        e = self.engine()
+        d = e.step(dec.DecisionFrame(0.0, (person(1, (0.45, 2.0), 2.0),), CLEAR, (), (0.0, 0.0)))
+        self.assertEqual(d.rule, 1)  # 0.45 m off-centre: inside the 1.00 m pallet footprint
 
     def test_passage_for_other_required_width_is_unknown(self):
-        d = self.engine().step(dec.DecisionFrame(0.0, (), dec.PassageState("clear", 1.5, 0.8), (), (0.0, 0.0)))
+        d = self.engine().step(dec.DecisionFrame(0.0, (), dec.PassageState("clear", 1.5, 0.8), (), (0.0, 0.0)))  # 0.8 != 1.0
         self.assertEqual((d.decision, d.rule), ("WAIT", 5))
         self.assertIn("evaluated for 0.80 m", d.reason)
 
@@ -151,7 +229,7 @@ class GeometryAndEdgeCaseTests(unittest.TestCase):
 
     def test_stop_hold_counts_frames_not_time(self):
         e = self.engine()
-        for i, t in enumerate([0.0, 0.01, 0.02]):
+        for t in [0.0, 0.01, 0.02]:
             d = e.step(dec.DecisionFrame(t, (), CLEAR, (dec.GestureEvent(t, 1, "STOP", 0.9),)))
         self.assertEqual((d.decision, d.rule), ("STOP", 3))
 
@@ -162,10 +240,14 @@ class IsolationAndOutputTests(unittest.TestCase):
         mods = {a.name.split(".")[0] for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
         mods |= {n.module.split(".")[0] for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and n.module}
         self.assertTrue(mods <= {"__future__", "math", "dataclasses"}, mods)
+        tree = ast.parse((ROOT / "footprint.py").read_text(encoding="utf-8"))
+        mods = {a.name.split(".")[0] for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
+        mods |= {n.module.split(".")[0] for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and n.module}
+        self.assertTrue(mods <= {"__future__", "json", "pathlib"}, mods)
 
     def test_no_reference_loaders_imported(self):
         banned = {"thud_data", "fuse_objects", "estimate_motion", "validate_depth", "report_motion", "report_step4"}
-        for f in ["decision.py", "decision_io.py", "run_decisions.py", "replay_decisions.py"]:
+        for f in ["decision.py", "decision_io.py", "footprint.py", "run_decisions.py", "replay_decisions.py"]:
             p = ROOT / f
             if not p.exists():
                 continue

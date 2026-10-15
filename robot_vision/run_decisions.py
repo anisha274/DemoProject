@@ -35,9 +35,9 @@ def main() -> None:
     cfg_path = dio.resolve(a.config)
     cfg, robot, load, req = dio.load_decision_config(cfg_path)
     out = dio.new_run_dir(cfg, "decisions_scenarios")
-    hashes = dio.copy_configs(out, [cfg_path, dio.resolve(cfg["paths"]["robot_config"]),
-                                    dio.resolve(cfg["paths"]["load_config"])])
-    info = dio.run_info(cfg_path, {"config_sha256": hashes, "required_width": req,
+    hashes = dio.copy_configs(out, [cfg_path] + dio.footprint_files(req))
+    info = dio.run_info(cfg_path, {"config_sha256": hashes, "required_width": dio.footprint_record(req),
+                                   "look_ahead": cfg["look_ahead"],
                                    "required_width_label": load["label"], "decision_config": cfg,
                                    "robot_config": robot, "load_config": load,
                                    "inputs": "scenario files (placeholder providers); no dataset"})
@@ -54,7 +54,7 @@ def main() -> None:
         (sub / sp.name).write_bytes(sp.read_bytes())
         dio.write_decisions(sub, decisions, {"scenario": sc["name"], "description": sc.get("description", ""),
                                              "scenario_file": str(sp), "scenario_sha256": dio.sha256(sp),
-                                             "git": info["git"], "required_width": req})
+                                             "git": info["git"], "required_width": dio.footprint_record(req)})
         summary[sc["name"]] = {"frames": len(decisions), "assumption_mismatches": problems,
                                "expectation_errors": errors[:20], "n_expectation_errors": len(errors),
                                "passed": not problems and not errors}

@@ -1,13 +1,14 @@
 {
  "name": "rule2_person_entering",
- "description": "Trusted person beside (not in) the corridor walks toward it at 1 m/s (enters in about 1.55 s): STOP. When they walk away, the robot resumes after resume_hold_s.",
+ "description": "Trusted person beside (not in) the corridor walks toward it at 1 m/s (enters the stop zone in about 1.5 s): STOP. When they walk away, the robot resumes after resume_hold_s.",
  "config_assumptions": {
   "move_hold_s": 0.5,
   "resume_hold_s": 1.0,
   "gesture_timeout_s": 0.5,
   "stop_hold_frames": 3,
   "gesture_min_confidence": 0.6,
-  "required_width_m": 0.9,
+  "required_width_m": 1.0,
+  "look_ahead_m": 3.0,
   "caution_lateral_m": 1.0,
   "caution_ahead_m": 3.0,
   "entry_horizon_s": 3.0,
@@ -101,7 +102,7 @@
    "track_ids": [
     2
    ],
-   "reason_contains": "person entering route: track 2 predicted to enter in"
+   "reason_contains": "person entering stop zone: track 2 predicted to enter in"
   },
   {
    "from_t": 3.0,

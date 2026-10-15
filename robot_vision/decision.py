@@ -7,8 +7,8 @@ the Unity scene, the Step 6 passage result, the gesture adapter) and passes it t
 Ground plane: (x, z) in metres, in the frame of the route corridor (THUD: world x-z, y up).
 
 Rules, checked top-down; the first match wins (configs/decision.json holds every threshold):
- 1. Person inside the corridor (latest valid position; no motion needed)          -> STOP
- 2. Person predicted to enter the corridor within entry_horizon_s (trusted motion) -> STOP
+ 1. Person inside the stop zone (latest valid position; no motion needed)          -> STOP
+ 2. Person predicted to enter the stop zone within entry_horizon_s (trusted motion) -> STOP
  3. Valid STOP gesture from anyone                                                  -> STOP
  4. Person in the caution zone without trusted motion                               -> STOP
  5. Passage blocked / unknown / not_evaluated                                       -> WAIT
@@ -16,6 +16,10 @@ Rules, checked top-down; the first match wins (configs/decision.json holds every
  7. Valid MOVE held for move_hold_s and passage clear                               -> MOVE
  8. Otherwise                                                                       -> WAIT
 Switching to STOP is immediate; switching to MOVE needs the rule-7 conditions to hold for resume_hold_s.
+
+Stop zone: the corridor from the robot's projected position to look_ahead_m ahead (flat far end), where
+look_ahead_m = v * reaction_s + v^2 / (2 * decel) + buffer_m (footprint.look_ahead). Caution zone: outside the
+stop zone, within caution_lateral_m of the corridor edge, up to caution_ahead_m ahead (flat far end).
 """
 
 from __future__ import annotations
@@ -32,7 +36,7 @@ EPS = 1e-9
 
 RULE_NAMES = {
     1: "person in route",
-    2: "person entering route",
+    2: "person entering stop zone",
     3: "STOP gesture",
     4: "cannot confirm person's movement",
     5: "cannot confirm passage is clear",
@@ -118,24 +122,6 @@ class Decision:
         return asdict(self)
 
 
-# ---------------------------------------------------------------- required width
-
-def required_width(robot: dict, load: dict | None) -> dict:
-    """required_width_m = (furthest right - furthest left extent of robot and load, from the robot centre line)
-    + 2 * safety_margin_per_side_m. The robot is centred on its centre line; lateral_offset_m > 0 is to the right."""
-    half = robot["robot_width_m"] / 2
-    left, right = -half, half
-    if load:
-        if not load["width_m"] > 0:
-            raise ValueError("load width must be positive")
-        off = load.get("lateral_offset_m", 0.0)
-        left, right = min(left, off - load["width_m"] / 2), max(right, off + load["width_m"] / 2)
-    margin = robot["safety_margin_per_side_m"]
-    return {"required_width_m": round(right - left + 2 * margin, 6), "left_extent_m": round(left, 6),
-            "right_extent_m": round(right, 6), "margin_per_side_m": margin,
-            "load_label": (load or {}).get("label", "no load configured")}
-
-
 # ---------------------------------------------------------------- corridor geometry
 
 class Polyline:
@@ -168,6 +154,45 @@ class Polyline:
             if d < best[0]:
                 best = (d, ca + u * seg)
         return best
+
+    def point_and_tangent(self, s: float) -> tuple[tuple[float, float], tuple[float, float]]:
+        """Point at arc length s (clamped) and the unit direction of travel there."""
+        s = max(0.0, min(s, self.length))
+        for i in range(len(self.pts) - 1):
+            ca, cb = self.cum[i], self.cum[i + 1]
+            if cb - ca <= EPS or (s > cb + EPS and i < len(self.pts) - 2):
+                continue
+            (ax, az), (bx, bz) = self.pts[i], self.pts[i + 1]
+            u = min(max((s - ca) / (cb - ca), 0.0), 1.0)
+            return (ax + u * (bx - ax), az + u * (bz - az)), ((bx - ax) / (cb - ca), (bz - az) / (cb - ca))
+        (ax, az), (bx, bz) = self.pts[-2], self.pts[-1]
+        n = math.hypot(bx - ax, bz - az) or 1.0
+        return self.pts[-1], ((bx - ax) / n, (bz - az) / n)
+
+    def zone(self, p, s0: float, s1: float, half: float) -> tuple[bool, float, float]:
+        """Band of half-width `half` around the line between arc lengths s0 and s1, with a flat far end at s1
+        (round at s0, which covers the robot body). Returns (inside, distance to the centre-line portion,
+        arc length of the nearest point); a point past the flat end is outside whatever its distance."""
+        d, s = self.nearest(p, s0, s1)
+        if d > half + EPS:
+            return False, d, s
+        if s >= min(s1, self.length) - EPS:
+            e, t = self.point_and_tangent(s1)
+            if (p[0] - e[0]) * t[0] + (p[1] - e[1]) * t[1] > EPS:
+                return False, d, s
+        return True, d, s
+
+    def gap_to_zone(self, p, s0: float, s1: float, half: float) -> float:
+        """Ground distance from p to the zone (0 inside): to its side, or to its flat far end."""
+        inside, d, s = self.zone(p, s0, s1, half)
+        if inside:
+            return 0.0
+        e, t = self.point_and_tangent(s1)
+        along = (p[0] - e[0]) * t[0] + (p[1] - e[1]) * t[1]
+        if s >= min(s1, self.length) - EPS and along > EPS:
+            across = abs(-(p[0] - e[0]) * t[1] + (p[1] - e[1]) * t[0])
+            return math.hypot(along, max(0.0, across - half))
+        return max(0.0, d - half)
 
 
 # ---------------------------------------------------------------- gestures
@@ -226,9 +251,15 @@ class DecisionEngine:
         self.required = required
         self.corridor = corridor
         self.line = Polyline(corridor.centreline_xz)
-        # the corridor is never narrower than the robot-and-load footprint it must hold
-        self.corridor_width_m = max(corridor.width_m, self.required_m)
+        # one required width everywhere: the corridor is the robot-and-load footprint plus margins
+        if abs(corridor.width_m - self.required_m) > 1e-6:
+            raise ValueError(f"corridor width {corridor.width_m} m differs from the required width "
+                             f"{self.required_m} m; build the corridor from footprint.load_footprint()")
+        self.corridor_width_m = self.required_m
         self.half = self.corridor_width_m / 2
+        self.look_ahead_m = cfg["look_ahead"]["look_ahead_m"]
+        if cfg["caution_ahead_m"] < self.look_ahead_m - EPS:
+            raise ValueError(f"caution_ahead_m {cfg['caution_ahead_m']} < look_ahead_m {self.look_ahead_m}")
         self.gestures = GestureFilter(cfg)
         self.memory: dict = {}  # track_id -> (timestamp, position_xz) of the latest valid position
         self.last_t: float | None = None
@@ -255,12 +286,17 @@ class DecisionEngine:
             return False, f"beyond_motion_range ({p.distance_m:.2f} m > {self.cfg['motion_range_m']:.1f} m)"
         return True, "trusted"
 
+    def _in_stop_zone(self, p, s_robot: float) -> tuple[bool, float, float]:
+        return self.line.zone(p, s_robot, s_robot + self.look_ahead_m, self.half)
+
     def _entry_time(self, pos, vel, s_robot: float) -> float | None:
+        """First sampled time at which the constant-velocity prediction is inside the current stop zone. Robot
+        motion is not added: it is what look_ahead_m (reaction + braking + buffer) already covers."""
         step, horizon = self.cfg["entry_time_step_s"], self.cfg["entry_horizon_s"]
         for k in range(1, int(round(horizon / step)) + 1):
             tau = k * step
             q = (pos[0] + vel[0] * tau, pos[1] + vel[1] * tau)
-            if self.line.nearest(q, s_robot)[0] <= self.half + EPS:
+            if self._in_stop_zone(q, s_robot)[0]:
                 return round(tau, 6)
         return None
 
@@ -273,19 +309,24 @@ class DecisionEngine:
         a = {"track_id": tid, "observed": p is not None, "position_xz": pos, "position_source": src,
              "distance_m": p.distance_m if p else None, "motion_label": p.motion_label if p else None,
              "velocity_xz": p.velocity_xz if p else None, "motion_trusted": p.motion_trusted if p else None,
-             "in_route": False, "entry_in_s": None, "in_caution_zone": False}
+             "in_stop_zone": False, "entry_in_s": None, "in_caution_zone": False}
         ok, status = self._motion(p, src)
         a["motion_usable"], a["motion_status"] = ok, status
         if pos is not None:
             d, s = self.line.nearest(pos, s_robot)
             a["dist_to_centreline_m"], a["ahead_m"] = round(d, 4), round(s - s_robot, 4)
-            a["in_route"] = d <= self.half + EPS
-            if not a["in_route"]:
-                dc, sc = self.line.nearest(pos, s_robot, s_robot + self.cfg["caution_ahead_m"])
+            a["in_stop_zone"] = self._in_stop_zone(pos, s_robot)[0]
+            if not a["in_stop_zone"]:
+                inside_c, dc, _ = self.line.zone(pos, s_robot, s_robot + self.cfg["caution_ahead_m"],
+                                                 self.half + self.cfg["caution_lateral_m"])
                 a["dist_to_corridor_edge_m"] = round(dc - self.half, 4)
-                a["in_caution_zone"] = dc - self.half <= self.cfg["caution_lateral_m"] + EPS
+                a["in_caution_zone"] = inside_c
                 if ok:
                     a["entry_in_s"] = self._entry_time(pos, p.velocity_xz, s_robot)
+                    if a["entry_in_s"] is not None:
+                        gap = self.line.gap_to_zone(pos, s_robot, s_robot + self.look_ahead_m, self.half)
+                        a["gap_to_stop_zone_m"] = round(gap, 4)
+                        a["closing_speed_mps"] = round(gap / a["entry_in_s"], 4)
         elif p is not None and self.cfg["unlocated_person_in_caution_zone"]:
             # detected but not locatable: inside the caution zone unless it is known to be farther away
             a["in_caution_zone"] = p.distance_m is None or p.distance_m <= self.cfg["caution_ahead_m"] + EPS
@@ -329,6 +370,7 @@ class DecisionEngine:
         snapshot = {
             "robot_xz": f.robot_xz, "robot_arc_length_m": round(s_robot, 4), "corridor_label": self.corridor.label,
             "corridor_width_m": self.corridor_width_m, "required_width_m": self.required_m,
+            "look_ahead_m": self.look_ahead_m,
             "persons": people, "passage": asdict(f.passage), "passage_effective_status": passage_status,
             "passage_note": passage_note, "gestures": gs,
         }
@@ -338,10 +380,10 @@ class DecisionEngine:
 
     def _rules(self, t, people, gs, passage, status, note):
         req = self.required_m
-        r1 = [a for a in people if a["in_route"]]
+        r1 = [a for a in people if a["in_stop_zone"]]
         r2 = [a for a in people if a["entry_in_s"] is not None]
         stops = [g for g in gs if g["stop_accepted"]]
-        r4 = [a for a in people if a["in_caution_zone"] and not a["motion_usable"] and not a["in_route"]]
+        r4 = [a for a in people if a["in_caution_zone"] and not a["motion_usable"] and not a["in_stop_zone"]]
         any_stop = [g for g in gs if g["gesture"] == "STOP"]  # accepted or not: a STOP cancels every MOVE
         moves = [g for g in gs if g["gesture"] == "MOVE"] if not any_stop else []
         moves_held = [g for g in moves if g["move_accepted"]]
@@ -353,12 +395,13 @@ class DecisionEngine:
         if r1:
             out = ("STOP", 1, "person in route: " + "; ".join(
                 f"track {a['track_id']} {a['dist_to_centreline_m']:.2f} m from centre line, {a['ahead_m']:.2f} m ahead"
-                + (" (remembered position)" if a["position_source"] == "remembered" else "") for a in r1), ids(r1))
+                + (" (remembered position)" if a["position_source"] == "remembered" else "") for a in r1)
+                + f" (stop zone {self.look_ahead_m:.2f} m)", ids(r1))
         elif r2:
-            out = ("STOP", 2, "person entering route: " + "; ".join(
+            out = ("STOP", 2, "person entering stop zone: " + "; ".join(
                 f"track {a['track_id']} predicted to enter in {a['entry_in_s']:.2f} s "
-                f"(within {self.cfg['entry_horizon_s']:.1f} s) at {math.hypot(*a['velocity_xz']):.2f} m/s"
-                for a in r2), ids(r2))
+                f"(within {self.cfg['entry_horizon_s']:.1f} s), {a['gap_to_stop_zone_m']:.2f} m away, "
+                f"closing at {a['closing_speed_mps']:.2f} m/s" for a in r2), ids(r2))
         elif stops:
             out = ("STOP", 3, "STOP gesture: " + "; ".join(
                 f"track {g['track_id']} (confidence {g['confidence']:.2f}, {g['stop_frames']} frames)" for g in stops),

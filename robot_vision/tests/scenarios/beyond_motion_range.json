@@ -1,13 +1,14 @@
 {
  "name": "beyond_motion_range",
- "description": "Trusted person 6.8 m away walking toward the corridor: motion beyond motion_range_m counts as unknown, so rule 2 does not fire (MOVE). The same person at 4.5 m: STOP rule 2. A person in the corridor 8 m ahead: STOP rule 1 (no motion needed).",
+ "description": "Trusted person 6.3 m away, 2 m/s toward the stop zone: motion beyond motion_range_m counts as unknown, so rule 2 does not fire (MOVE). A similar person at 5.6 m: STOP rule 2. Then an untrusted person in the corridor 8 m ahead (beyond look-ahead and caution zone): no STOP.",
  "config_assumptions": {
   "move_hold_s": 0.5,
   "resume_hold_s": 1.0,
   "gesture_timeout_s": 0.5,
   "stop_hold_frames": 3,
   "gesture_min_confidence": 0.6,
-  "required_width_m": 0.9,
+  "required_width_m": 1.0,
+  "look_ahead_m": 3.0,
   "caution_lateral_m": 1.0,
   "caution_ahead_m": 3.0,
   "entry_horizon_s": 3.0,
@@ -30,7 +31,7 @@
  },
  "time": {
   "start_s": 0.0,
-  "end_s": 4.0,
+  "end_s": 5.0,
   "dt_s": 0.1
  },
  "robot_xz": [
@@ -43,11 +44,11 @@
    "from_t": 0,
    "to_t": 2.0,
    "position_xz": [
-    2.0,
-    6.5
+    6.0,
+    2.0
    ],
    "velocity_xz": [
-    -1.0,
+    -2.0,
     0.0
    ],
    "motion_label": "moving_lateral",
@@ -58,11 +59,11 @@
    "from_t": 2.0,
    "to_t": 3.0,
    "position_xz": [
-    2.0,
-    4.0
+    5.5,
+    1.0
    ],
    "velocity_xz": [
-    -1.0,
+    -2.0,
     0.0
    ],
    "motion_label": "moving_lateral",
@@ -116,12 +117,15 @@
   },
   {
    "from_t": 3.0,
+   "to_t": 4.0,
+   "decision": "WAIT",
+   "rule": 8
+  },
+  {
+   "from_t": 4.0,
    "to_t": 99,
-   "decision": "STOP",
-   "rule": 1,
-   "track_ids": [
-    12
-   ]
+   "decision": "MOVE",
+   "rule": 7
   }
  ]
 }

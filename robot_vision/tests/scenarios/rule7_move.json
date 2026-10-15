@@ -7,7 +7,8 @@
   "gesture_timeout_s": 0.5,
   "stop_hold_frames": 3,
   "gesture_min_confidence": 0.6,
-  "required_width_m": 0.9,
+  "required_width_m": 1.0,
+  "look_ahead_m": 3.0,
   "caution_lateral_m": 1.0,
   "caution_ahead_m": 3.0,
   "entry_horizon_s": 3.0,
@@ -78,7 +79,7 @@
    "track_ids": [
     "operator"
    ],
-   "reason_contains": "passage clear: 1.50 m available, 0.90 m needed"
+   "reason_contains": "passage clear: 1.50 m available, 1.00 m needed"
   }
  ]
 }

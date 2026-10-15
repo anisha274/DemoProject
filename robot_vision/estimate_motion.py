@@ -745,10 +745,11 @@ def run(args: argparse.Namespace) -> Path:
     route_cfg = read_json(resolve(args.route_config)) if args.route_config else None
     route = None
     if route_cfg:
-        from make_proxy_route import required_width
-        w, _ = required_width(robot)
+        import footprint as fp
+        w = fp.load_footprint(resolve(cfg["robot_config"]))["required_width_m"]
         if abs(w - route_cfg["width_m"]) > 1e-6:
-            raise SystemExit(f"Route width {route_cfg['width_m']} differs from robot.json required width {w}; regenerate it.")
+            raise SystemExit(f"Route width {route_cfg['width_m']} differs from the required width {w} "
+                             f"(footprint.load_footprint); regenerate it with make_proxy_route.py.")
         route = {"label": route_cfg["label"], "width_m": route_cfg["width_m"], "line": np.array(route_cfg["centreline_xz_m"])}
     fusion = resolve(args.fusion_run)
     if not (fusion / "COMPLETE").exists():

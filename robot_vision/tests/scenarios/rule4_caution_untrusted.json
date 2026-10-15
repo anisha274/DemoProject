@@ -1,13 +1,14 @@
 {
  "name": "rule4_caution_untrusted",
- "description": "Untrusted person in the caution zone (0.45 m from the corridor edge, 2 m ahead): STOP. People beyond caution_ahead_m or beyond caution_lateral_m do not stop the robot.",
+ "description": "Untrusted person in the caution zone (0.40 m from the corridor edge, 2 m ahead): STOP. People beyond caution_ahead_m or beyond caution_lateral_m do not stop the robot.",
  "config_assumptions": {
   "move_hold_s": 0.5,
   "resume_hold_s": 1.0,
   "gesture_timeout_s": 0.5,
   "stop_hold_frames": 3,
   "gesture_min_confidence": 0.6,
-  "required_width_m": 0.9,
+  "required_width_m": 1.0,
+  "look_ahead_m": 3.0,
   "caution_lateral_m": 1.0,
   "caution_ahead_m": 3.0,
   "entry_horizon_s": 3.0,
@@ -110,7 +111,7 @@
    "track_ids": [
     3
    ],
-   "reason_contains": "cannot confirm person's movement: track 3 in caution zone (0.45 m from corridor edge, 2.00 m ahead), motion untrusted"
+   "reason_contains": "cannot confirm person's movement: track 3 in caution zone (0.40 m from corridor edge, 2.00 m ahead), motion untrusted"
   }
  ]
 }

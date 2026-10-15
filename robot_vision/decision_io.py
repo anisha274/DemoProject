@@ -32,9 +32,10 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+import footprint as fp
 import run_paths as rp
 from decision import (RULE_NAMES, Decision, DecisionEngine, DecisionFrame, GestureEvent, PassageState, PersonState,
-                      RouteCorridor, required_width)
+                      RouteCorridor)
 
 HERE = Path(__file__).resolve().parent
 DEFAULT_CONFIG = "configs/decision.json"
@@ -51,11 +52,23 @@ def read_json(p: str | Path) -> dict:
 
 
 def load_decision_config(path: str | Path = DEFAULT_CONFIG) -> tuple[dict, dict, dict, dict]:
-    """(decision config, robot config, load config, required-width record)."""
+    """(decision config, robot config, load config, footprint record). The required width comes only from
+    footprint.load_footprint (robot.json + the load file it names); look_ahead_m is recomputed and checked."""
     cfg = read_json(path)
-    robot = read_json(cfg["paths"]["robot_config"])
-    load = read_json(cfg["paths"]["load_config"])
-    return cfg, robot, load, required_width(robot, load)
+    foot = fp.load_footprint(resolve(cfg["paths"]["robot_config"]))
+    la = fp.look_ahead(foot["robot"], cfg["look_ahead"])
+    if cfg["caution_ahead_m"] < la["look_ahead_m"] - EPS:
+        raise ValueError(f"caution_ahead_m {cfg['caution_ahead_m']} < look_ahead_m {la['look_ahead_m']}")
+    cfg = {**cfg, "look_ahead": {**cfg["look_ahead"], **la}}
+    return cfg, foot["robot"], foot["load"], foot
+
+
+def footprint_files(foot: dict) -> list[Path]:
+    return [foot["robot_path"]] + ([foot["load_path"]] if foot["load_path"] else [])
+
+
+def footprint_record(foot: dict) -> dict:
+    return {k: v for k, v in foot.items() if k not in ("robot", "load")}
 
 
 def _within(seg: dict, t: float) -> bool:
@@ -135,7 +148,7 @@ def scenario_frames(sc: dict, required_width_m: float):
 
 def check_assumptions(sc: dict, cfg: dict, required: dict) -> list[str]:
     """Config values a scenario's timings were written for; a mismatch means the scenario needs revisiting."""
-    have = {**cfg, "required_width_m": required["required_width_m"]}
+    have = {**cfg, "required_width_m": required["required_width_m"], "look_ahead_m": cfg["look_ahead"]["look_ahead_m"]}
     return [f"{k}: scenario assumes {v}, config has {have.get(k)}"
             for k, v in sc.get("config_assumptions", {}).items() if have.get(k) != v]
 
@@ -166,7 +179,7 @@ def check_expectations(sc: dict, decisions: list[Decision]) -> list[str]:
 # ---------------------------------------------------------------- run folders
 
 CSV_FIELDS = ["timestamp", "decision", "rule", "rule_name", "reason", "track_ids", "passage_status",
-              "passage_effective_status", "available_width_m", "required_width_m", "n_persons", "n_in_route",
+              "passage_effective_status", "available_width_m", "required_width_m", "n_persons", "n_in_stop_zone",
               "n_entering", "n_in_caution_zone", "gestures"]
 
 
@@ -224,7 +237,7 @@ def csv_row(d: Decision) -> dict:
             "passage_status": s["passage"]["status"], "passage_effective_status": s["passage_effective_status"],
             "available_width_m": "" if s["passage"]["available_width_m"] is None else s["passage"]["available_width_m"],
             "required_width_m": s["required_width_m"], "n_persons": len(ps),
-            "n_in_route": sum(a["in_route"] for a in ps),
+            "n_in_stop_zone": sum(a["in_stop_zone"] for a in ps),
             "n_entering": sum(a["entry_in_s"] is not None for a in ps),
             "n_in_caution_zone": sum(a["in_caution_zone"] for a in ps), "gestures": gest}
 

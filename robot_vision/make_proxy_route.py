@@ -1,8 +1,8 @@
 """Write an explicit route-corridor config ("proxy_route") from the recorded camera trajectory of a fusion run.
 
 The corridor centreline is the recorded reference camera path on the ground plane (world x, z), resampled
-every --spacing metres. Its width is the required passage width from robot.json:
-robot_width_m (+ load width when measured) + 2 * safety_margin_per_side_m.
+every --spacing metres. Its width is the one required passage width, footprint.load_footprint (robot.json and
+the load file it names). Step 9 decisions read only the centreline, never this width.
 This is a test fixture for THUD, not a planned robot route; using reference poses makes it a controlled
 experimental baseline.
 
@@ -18,15 +18,8 @@ import json
 
 import numpy as np
 
+import footprint as fp
 from fuse_objects import resolve
-
-
-def required_width(robot: dict) -> tuple[float, str]:
-    load = robot.get("load") or {}
-    load_w = load.get("width_m")
-    body = max(robot["robot_width_m"], load_w) if load_w else robot["robot_width_m"]
-    note = "robot and load footprint" if load_w else "robot only: load not measured yet, so this is a lower bound"
-    return body + 2 * robot["safety_margin_per_side_m"], note
 
 
 def resample(path: np.ndarray, spacing: float) -> np.ndarray:
@@ -50,8 +43,9 @@ def main() -> None:
     info = json.loads((run / "run_info.json").read_text(encoding="utf-8"))
     cam = np.array([[f["pose_translation"][0], f["pose_translation"][2]] for f in frames])
     line = resample(cam, a.spacing)
-    robot = json.loads(resolve(a.robot_config).read_text(encoding="utf-8"))
-    width, note = required_width(robot)
+    foot = fp.load_footprint(resolve(a.robot_config))
+    width = foot["required_width_m"]
+    note = f"robot and load footprint (load: {foot['load_label']})" if foot["load"] else "robot only (no load configured)"
     out = {
         "label": "proxy_route",
         "description": "Corridor around the recorded reference camera path; a THUD test fixture, not a planned robot route.",
@@ -61,7 +55,7 @@ def main() -> None:
         "centreline_xz_m": [[round(x, 4), round(z, 4)] for x, z in line],
         "centreline_length_m": round(float(np.linalg.norm(np.diff(line, axis=0), axis=1).sum()), 4),
         "width_m": round(width, 4),
-        "width_rule": "robot_width_m (or max with load width when measured) + 2 * safety_margin_per_side_m from robot.json",
+        "width_rule": "footprint.required_width: (furthest right - furthest left extent of robot and load) + 2 * safety_margin_per_side_m",
         "width_note": note,
         "resample_spacing_m": a.spacing,
     }

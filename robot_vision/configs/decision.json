@@ -2,10 +2,27 @@
   "label": "Step 9 decision rules",
   "declared": "2026-10-15, before any decision run or evaluation. Values chosen from physical reasoning (below), not from results; to be reviewed by the project owner. Any later change must be disclosed in the README.",
 
+  "changes_after_replay_demo": [
+    "2026-10-15, after the Capture_2 replay demo and before any evaluation; design decisions by the project owner, not tuning:",
+    "look_ahead added: rule 1 applies only inside the stop zone (corridor within look_ahead_m ahead); rule 2 predicts entry into the stop zone. Before: rule 1 used the whole corridor ahead.",
+    "load changed from a 0.70 m tray to a centred Euro pallet (0.80 m across travel): required width 0.90 -> 1.00 m.",
+    "one required width (footprint.load_footprint from robot.json and the load file it names); paths.load_config removed; the corridor width must equal it."
+  ],
+
   "paths": {
     "robot_config": "configs/robot.json",
-    "load_config": "configs/load.json",
     "output_root": "outputs"
+  },
+
+  "look_ahead": {
+    "formula": "look_ahead_m = v * reaction_s + v^2 / (2 * decel) + buffer_m",
+    "v": "robot.json max_speed_mps",
+    "decel": "robot.json decel_mps2",
+    "inputs_at_declaration": {"max_speed_mps": 1.0, "decel_mps2": 0.5},
+    "reaction_s": 0.5,
+    "buffer_m": 1.5,
+    "look_ahead_m": 3.0,
+    "check": "footprint.look_ahead recomputes look_ahead_m from robot.json and these inputs and refuses a mismatch; the engine refuses caution_ahead_m < look_ahead_m."
   },
 
   "motion_range_m": 6.0,
@@ -23,13 +40,14 @@
   "resume_hold_s": 1.0,
 
   "why": {
+    "look_ahead": "Owner's decision: reaction distance (1.0 m/s * 0.5 s = 0.5 m) + braking distance (1.0^2 / (2 * 0.5) = 1.0 m) + 1.5 m buffer = 3.0 m. A person beyond it is far enough for the robot to stop after detecting them inside it.",
     "motion_range_m": "Decided before Step 9: the motion operating range. Step 8 was evaluated in the 0-3 m and 3-6 m bins; beyond 6 m motion counts as unknown.",
-    "entry_horizon_s": "A walking person (1.4 m/s) covers about 4 m in 3 s, more than the 3 m caution distance, so a crossing person is stopped for before reaching the corridor. Shorter than the Step 8 route horizon (5 s), because constant-velocity prediction degrades with look-ahead.",
+    "entry_horizon_s": "A walking person (1.4 m/s) covers about 4 m in 3 s, more than the 3 m caution distance, so a crossing person is stopped for before reaching the stop zone. Shorter than the Step 8 route horizon (5 s), because constant-velocity prediction degrades with look-ahead.",
     "entry_time_step_s": "0.05 s at 1.4 m/s is 7 cm per step, well under the corridor half-width.",
     "caution_lateral_m": "One arm's length plus a step beside the corridor edge: a person this close can enter the corridor in under 1 s.",
-    "caution_ahead_m": "Distance the robot would cover in about 3 s at a slow warehouse speed of 1 m/s; within the 0-3 m bin where Step 8 motion is best characterised.",
+    "caution_ahead_m": "Distance the robot would cover in about 3 s at 1 m/s; within the 0-3 m bin where Step 8 motion is best characterised. Must be >= look_ahead_m (equal at the declared values).",
     "person_memory_s": "A tracked person whose position drops out (occlusion, invalid depth) keeps its latest valid position for 1 s, which is longer than resume_hold_s, so a brief dropout cannot release a STOP on its own.",
-    "unlocated_person_in_caution_zone": "A person detected without a usable position counts as in the caution zone unless its measured distance is beyond caution_ahead_m (prefer unknown over guesses).",
+    "unlocated_person_in_caution_zone": "A person detected without a usable position counts as in the caution zone unless its distance_m is beyond caution_ahead_m. distance_m comes from the person provider: in the THUD replay, Step 8 distance_m = ground distance from camera_proxy to the median of the valid-depth pixels selected for the track, available even when position_valid is false. It is a median, not a lower bound (see README).",
     "gesture_min_confidence": "Gesture-module outputs below this count as NONE. To be checked against the gesture module's own operating point when the adapter exists.",
     "stop_hold_frames": "Three consecutive gesture frames rejects single-frame flicker while adding only a few frames of delay to a STOP.",
     "move_hold_s": "MOVE needs a deliberate gesture: longer than STOP because releasing the robot is the riskier direction.",
@@ -38,10 +56,13 @@
   },
 
   "conventions": [
-    "Corridor: centreline in travel order; only the part from the robot's projected position onwards counts (robot_xz unknown -> the whole corridor). Its width is max(configured corridor width, required_width_m).",
-    "Caution zone: outside the corridor, within caution_lateral_m of its edge, along the next caution_ahead_m of route.",
+    "Corridor: centreline in travel order, width = required_width_m (footprint.load_footprint); only the part from the robot's projected position onwards counts (robot_xz unknown -> from the start of the line).",
+    "Stop zone: the corridor from the robot's projected position to look_ahead_m ahead, flat at the far end.",
+    "Caution zone: outside the stop zone, within caution_lateral_m of the corridor edge, up to caution_ahead_m ahead (flat far end). With caution_ahead_m = look_ahead_m it contains no corridor beyond the stop zone.",
+    "Rule 2 prediction: constant person velocity against the current stop zone; robot motion is covered by look_ahead_m. Covers sideways entry and head-on approach; the reason reports the gap and the closing speed (gap / time to entry).",
     "Trusted motion: motion_trusted, a motion label other than unknown / insufficient_history, a velocity, a current position and distance_m <= motion_range_m. Otherwise motion counts as unknown.",
     "Any current STOP gesture (accepted or not yet) cancels every MOVE gesture, so a STOP from one person always overrides a MOVE from another.",
-    "Passage: a 'clear' status without a width, or with a width below required_width_m, is treated as unknown / too_narrow; a passage evaluated for a different required width is treated as unknown."
+    "Passage: a 'clear' status without a width, or with a width below required_width_m, is treated as unknown / too_narrow; a passage evaluated for a different required width is treated as unknown.",
+    "Step 8 route fields (route_label, route_status, dist_to_route_centreline_m, time_to_route_*, p_enter_route_within_horizon) and the proxy_route width_m are proxies and are not read by decisions; decisions read only the proxy_route centreline."
   ]
 }
