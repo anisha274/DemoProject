@@ -105,7 +105,10 @@ def main() -> None:
         wr = csv.DictWriter(f, fieldnames=FIELDS)
         wr.writeheader()
         wr.writerows(rows)
-    hashes = dio.copy_configs(out, [cfg_path, depth_cfg_path, office_path])
+    hashes = dio.copy_configs(out, [cfg_path, depth_cfg_path])
+    # office.json holds the machine's dataset root: store it with portable paths, never as a raw copy
+    dio.write_json(out / "config_used" / office_path.name, dio.read_json(office_path))
+    hashes[office_path.name] = dio.sha256(office_path)
     sel = [(float(r["depth_percentile_m"]), float(r["step4_selected_depth_median_m"])) for r in rows
            if r["depth_percentile_m"] != "" and r["step4_selected_depth_median_m"]]
     info = dio.run_info(cfg_path, {

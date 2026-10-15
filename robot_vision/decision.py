@@ -420,6 +420,8 @@ class DecisionEngine:
             def where(a):
                 if a.get("unlocated"):
                     return f"position unknown, at least {_f2(a['distance_lower_bound_m'])} m away"
+                if a["dist_to_corridor_edge_m"] <= 0:
+                    return f"inside the corridor beyond the stop zone, {a['ahead_m']:.2f} m ahead"
                 return f"{a['dist_to_corridor_edge_m']:.2f} m from corridor edge, {a['ahead_m']:.2f} m ahead"
             out = ("STOP", 4, "cannot confirm person's movement: " + "; ".join(
                 f"track {a['track_id']} in caution zone ({where(a)}), motion {a['motion_status']}" for a in r4), ids(r4))
